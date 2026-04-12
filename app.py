@@ -1,7 +1,3 @@
-# app.py - Lung Nodule Segmentation Tool
-# HIT500 Capstone Project - Nqobile Maware
-# Loads model from Google Drive
-
 import streamlit as st
 import torch
 import torch.nn as nn
@@ -15,29 +11,21 @@ import gdown
 from skimage.transform import resize
 
 # ========== GOOGLE DRIVE SETUP ==========
-# REPLACE THIS WITH YOUR ACTUAL FILE ID
-GOOGLE_DRIVE_FILE_ID = "1L9qrtFk12EAOI_h2ru5BzVFAMmsvHJHV"  # <-- PUT YOUR FILE ID HERE
-
-MODEL_FILENAME = "best_unet_model.pth"
+GOOGLE_DRIVE_FILE_ID = "1L9qrtFk12EAOI_h2ru5BzVFAMmsvHJHV"  # Replace with your actual FILE ID
+MODEL_FILENAME = "best_unet_model_fixed.pth"
 
 def download_model_from_drive():
-    """Download model from Google Drive if not already downloaded"""
     if not os.path.exists(MODEL_FILENAME):
-        with st.spinner("Downloading model from Google Drive... (first time only)"):
+        with st.spinner("Downloading model from Google Drive..."):
             url = f"https://drive.google.com/uc?id={GOOGLE_DRIVE_FILE_ID}"
             gdown.download(url, MODEL_FILENAME, quiet=False)
             st.success("Model downloaded successfully!")
     return MODEL_FILENAME
 
 # ========== PAGE CONFIG ==========
-st.set_page_config(
-    page_title="Lung Nodule Segmentation",
-    page_icon="🫁",
-    layout="wide"
-)
+st.set_page_config(page_title="Lung Nodule Segmentation", page_icon="🫁", layout="wide")
 
-# ========== U-NET MODEL ARCHITECTURE ==========
-
+# ========== U-NET MODEL ==========
 class DoubleConv(nn.Module):
     def __init__(self, in_ch, out_ch):
         super(DoubleConv, self).__init__()
@@ -113,14 +101,10 @@ class UNet(nn.Module):
         x = self.up4(x, x1)
         return torch.sigmoid(self.outc(x))
 
-# ========== LOAD MODEL FROM GOOGLE DRIVE ==========
-
+# ========== LOAD MODEL ==========
 @st.cache_resource
 def load_model():
-    # Download model from Google Drive
     model_path = download_model_from_drive()
-    
-    # Load model
     model = UNet()
     try:
         model.load_state_dict(torch.load(model_path, map_location='cpu'))
@@ -129,16 +113,20 @@ def load_model():
         st.error(f"Error loading model: {e}")
         return model, False
 
-# ========== SEGMENTATION FUNCTIONS ==========
+# ========== HELPER FUNCTIONS ==========
+def convert_to_grayscale(image):
+    if image.mode == 'RGBA':
+        image = image.convert('RGB')
+    if image.mode != 'L':
+        image = image.convert('L')
+    return np.array(image)
 
 def segment_nodule(model, image_array):
     if len(image_array.shape) == 3:
         image_array = image_array[:, :, 0]
     
-    # Resize to 256x256
     img_resized = resize(image_array, (256, 256))
     img_norm = (img_resized - img_resized.min()) / (img_resized.max() - img_resized.min() + 1e-8)
-    
     input_tensor = torch.FloatTensor(img_norm).unsqueeze(0).unsqueeze(0)
     
     model.eval()
@@ -155,7 +143,6 @@ def calculate_volume(mask, pixel_spacing_mm=0.7, slice_thickness_mm=1.25):
     return area_pixels * pixel_area_mm2 * slice_thickness_mm
 
 # ========== MAIN UI ==========
-
 st.title("🫁 Lung Nodule Segmentation Tool")
 st.markdown("### CNN-Based Automated Segmentation for CT Scans")
 st.markdown("**HIT500 Capstone | Biomedical Engineering | Nqobile Maware**")
@@ -172,7 +159,7 @@ if not st.session_state.logged_in:
         username = st.text_input("Username")
         password = st.text_input("Password", type="password")
         
-        if st.button("Login", use_container_width=True):
+        if st.button("Login"):
             if username == "radiologist" and password == "hit500":
                 st.session_state.logged_in = True
                 st.rerun()
@@ -199,17 +186,20 @@ else:
         uploaded = st.file_uploader("Choose CT image", type=["png", "jpg", "jpeg"])
         
         if uploaded:
-            image = Image.open(uploaded).convert("L")
-            original = np.array(image)
-            st.image(original, caption="Original CT Scan", use_container_width=True)
+            image = Image.open(uploaded)
+            original_array = convert_to_grayscale(image)
+            
+            st.subheader("📷 Original CT Scan")
+            # FIXED: Removed use_container_width
+            st.image(original_array, caption="Original CT Image")
             
             if st.button("🔍 Segment Nodule", type="primary"):
                 with st.spinner("Segmenting..."):
-                    mask = segment_nodule(model, original)
+                    mask = segment_nodule(model, original_array)
                     volume = calculate_volume(mask)
                     st.session_state['mask'] = mask
                     st.session_state['volume'] = volume
-                    st.session_state['original'] = original
+                    st.session_state['original'] = original_array
                 st.success("Segmentation complete!")
     
     with col_right:
@@ -239,20 +229,20 @@ else:
                 if original.shape != mask.shape:
                     mask = resize(mask, original.shape)
                 
-                # Create RGB overlay
                 original_norm = (original - original.min()) / (original.max() - original.min() + 1e-8)
                 overlay = np.stack([original_norm] * 3, axis=-1)
                 overlay[:, :, 0] = np.where(mask > 0.5, 1.0, overlay[:, :, 0])
                 overlay[:, :, 1] = np.where(mask > 0.5, 0.0, overlay[:, :, 1])
                 overlay[:, :, 2] = np.where(mask > 0.5, 0.0, overlay[:, :, 2])
-                st.image(overlay, caption="Nodule Highlighted in RED", use_container_width=True)
+                # FIXED: Removed use_container_width
+                st.image(overlay, caption="Nodule Highlighted in RED")
             
             with tab3:
                 area_pct = (np.sum(st.session_state['mask'] > 0.5) / st.session_state['mask'].size) * 100
                 cola, colb, colc = st.columns(3)
                 cola.metric("Volume", f"{st.session_state['volume']:.2f} mm³")
                 colb.metric("Nodule Area", f"{area_pct:.2f}%")
-                colc.metric("Model Dice", "0.9628")
+                colc.metric("Model Status", "Active")
                 
                 if area_pct < 1:
                     st.info("📌 Small nodule - Regular monitoring recommended")
@@ -262,4 +252,4 @@ else:
                     st.error("🚨 Large nodule - Urgent consultation recommended")
     
     st.markdown("---")
-    st.caption("© 2026 HIT500 Capstone | Model loaded from Google Drive")
+    st.caption("© 2026 HIT500 Capstone Project | Model loaded from Google Drive")
