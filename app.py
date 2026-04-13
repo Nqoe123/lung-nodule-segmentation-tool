@@ -9,9 +9,9 @@ import io
 import os
 import gdown
 from skimage.transform import resize
-import SimpleITK as sitk
 import tempfile
 import zipfile
+import SimpleITK as sitk
 
 # ========== GOOGLE DRIVE SETUP ==========
 GOOGLE_DRIVE_FILE_ID = "1FdIozNEVbIPUsjcdReAfmbgN3Nisx9yQ"  # Replace with your actual FILE ID
@@ -28,7 +28,7 @@ def download_model_from_drive():
 # ========== PAGE CONFIG ==========
 st.set_page_config(page_title="Lung Nodule Segmentation", page_icon="🫁", layout="wide")
 
-# ========== MEMORY EFFICIENT U-NET (EXACT ARCHITECTURE FROM TRAINING) ==========
+# ========== MEMORY EFFICIENT U-NET ==========
 class DoubleConv(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
@@ -79,14 +79,12 @@ class OutConv(nn.Module):
         return self.conv(x)
 
 class UNet(nn.Module):
-    """Memory Efficient U-Net - EXACT architecture from training code"""
     def __init__(self, n_channels=1, n_classes=1, bilinear=True):
         super().__init__()
         self.n_channels = n_channels
         self.n_classes = n_classes
         self.bilinear = bilinear
         
-        # Memory efficient - reduced channels (EXACT from training)
         self.inc = DoubleConv(n_channels, 32)
         self.down1 = Down(32, 64)
         self.down2 = Down(64, 128)
@@ -121,10 +119,8 @@ def load_model():
     model = UNet()
     
     try:
-        # Load checkpoint
         checkpoint = torch.load(model_path, map_location='cpu')
         
-        # Extract state dict from checkpoint
         if 'model_state_dict' in checkpoint:
             state_dict = checkpoint['model_state_dict']
             epoch = checkpoint.get('epoch', 'Unknown')
@@ -134,20 +130,17 @@ def load_model():
             epoch = 'Unknown'
             best_dice = 'Unknown'
         
-        # Handle DataParallel wrapper if present
         if state_dict and 'module.' in list(state_dict.keys())[0]:
             from collections import OrderedDict
             new_state_dict = OrderedDict()
             for k, v in state_dict.items():
-                name = k[7:]  # remove 'module.'
+                name = k[7:]
                 new_state_dict[name] = v
             state_dict = new_state_dict
         
-        # Load weights
         model.load_state_dict(state_dict)
         model.eval()
         
-        # Calculate and display model info
         total_params = sum(p.numel() for p in model.parameters())
         st.sidebar.success("✅ Model loaded successfully!")
         st.sidebar.info(f"Model Stats:\n"
@@ -159,87 +152,95 @@ def load_model():
         
     except Exception as e:
         st.error(f"Error loading model: {e}")
-        st.info("""
-        **Troubleshooting:**
-        1. Make sure you uploaded 'checkpoint_epoch_90.pth' to Google Drive
-        2. Update the GOOGLE_DRIVE_FILE_ID with your actual file ID
-        3. The file should be from your training output
-        
-        **To get the FILE_ID:**
-        - Upload your model to Google Drive
-        - Right-click → "Get link"
-        - Copy the file ID from the URL (the long string between /d/ and /view)
-        """)
         return model, False
 
-# ========== MHD FILE PROCESSING FUNCTIONS ==========
-def load_mhd_file(mhd_file, raw_file=None):
+# ========== MHD FILE LOADING WITH MULTI-UPLOAD ==========
+def load_mhd_files_from_uploads(uploaded_files):
     """
-    Load MHD file with its associated RAW file.
-    If raw_file is None, SimpleITK will look for the .raw file with the same base name.
+    Load MHD and RAW files from multiple file uploads
     """
-    try:
-        # Save uploaded files temporarily
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.mhd') as tmp_mhd:
-            tmp_mhd.write(mhd_file.getvalue())
-            mhd_path = tmp_mhd.name
-        
-        # If raw file is provided separately, save it too
-        if raw_file is not None:
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.raw') as tmp_raw:
-                tmp_raw.write(raw_file.getvalue())
-                raw_path = tmp_raw.name
-        else:
-            raw_path = None
-        
-        # Read the MHD file (SimpleITK automatically loads the associated .raw file)
-        itk_image = sitk.ReadImage(mhd_path)
-        
-        # Get the array from the image (z, y, x order)
-        ct_array = sitk.GetArrayFromImage(itk_image)
-        
-        # Get metadata
-        spacing = itk_image.GetSpacing()  # (x, y, z) spacing in mm
-        origin = itk_image.GetOrigin()    # (x, y, z) origin in world coordinates
-        
-        # Reorder spacing and origin to (z, y, x) to match array
-        spacing = (spacing[2], spacing[1], spacing[0])
-        origin = (origin[2], origin[1], origin[0])
-        
-        # Clean up temp files
-        os.unlink(mhd_path)
-        if raw_path and os.path.exists(raw_path):
-            os.unlink(raw_path)
-        
-        return ct_array, spacing, origin, itk_image
+    mhd_file = None
+    raw_file = None
     
+    # Separate the files
+    for uploaded_file in uploaded_files:
+        if uploaded_file.name.endswith('.mhd'):
+            mhd_file = uploaded_file
+        elif uploaded_file.name.endswith('.raw'):
+            raw_file = uploaded_file
+    
+    if not mhd_file:
+        st.error("No .mhd file found in uploaded files")
+        return None, None, None
+    
+    if not raw_file:
+        st.error("No .raw file found in uploaded files")
+        return None, None, None
+    
+    # Check if base names match
+    mhd_basename = os.path.splitext(mhd_file.name)[0]
+    raw_basename = os.path.splitext(raw_file.name)[0]
+    
+    if mhd_basename != raw_basename:
+        st.warning(f"⚠️ Base names don't match: '{mhd_basename}' vs '{raw_basename}'. They should be the same for proper loading.")
+    
+    try:
+        # Create a temporary directory
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Save files with their original names in the same directory
+            mhd_path = os.path.join(tmpdir, mhd_file.name)
+            raw_path = os.path.join(tmpdir, raw_file.name)
+            
+            # Write the files
+            with open(mhd_path, 'wb') as f:
+                f.write(mhd_file.getvalue())
+            
+            with open(raw_path, 'wb') as f:
+                f.write(raw_file.getvalue())
+            
+            # Update the MHD file to point to the correct raw file name
+            with open(mhd_path, 'r') as f:
+                mhd_content = f.read()
+            
+            # Look for ElementDataFile line and update it
+            import re
+            mhd_content = re.sub(
+                r'ElementDataFile\s*=\s*.*',
+                f'ElementDataFile = {raw_file.name}',
+                mhd_content
+            )
+            
+            # Write back the updated MHD file
+            with open(mhd_path, 'w') as f:
+                f.write(mhd_content)
+            
+            # Now read with SimpleITK
+            itk_image = sitk.ReadImage(mhd_path)
+            
+            # Get the array
+            ct_array = sitk.GetArrayFromImage(itk_image)
+            
+            # Get metadata
+            spacing = itk_image.GetSpacing()
+            origin = itk_image.GetOrigin()
+            
+            # Reorder to (z, y, x) to match array
+            spacing = (spacing[2], spacing[1], spacing[0])
+            origin = (origin[2], origin[1], origin[0])
+            
+            return ct_array, spacing, origin
+            
     except Exception as e:
-        st.error(f"Error loading MHD file: {e}")
-        return None, None, None, None
+        st.error(f"Error loading MHD/RAW files: {str(e)}")
+        return None, None, None
 
-def process_ct_scan(ct_array, spacing, origin, slice_index=None):
-    """
-    Process a CT scan array and return a normalized slice.
-    If slice_index is None, find the slice with the largest area of interest.
-    """
-    # Normalize CT values (window -1000 to 400 HU)
+# ========== CT PROCESSING FUNCTIONS ==========
+def process_ct_scan(ct_array):
+    """Process CT array and return normalized version"""
     window_min, window_max = -1000.0, 400.0
     ct_normalized = np.clip(ct_array, window_min, window_max)
     ct_normalized = (ct_normalized - window_min) / (window_max - window_min)
-    
-    # If no slice specified, find slice with most variation (likely where nodules are)
-    if slice_index is None:
-        # Calculate standard deviation for each slice
-        slice_std = [np.std(ct_normalized[i]) for i in range(ct_normalized.shape[0])]
-        slice_index = np.argmax(slice_std)
-    
-    # Ensure slice index is within bounds
-    slice_index = max(0, min(slice_index, ct_normalized.shape[0] - 1))
-    
-    # Extract the slice
-    ct_slice = ct_normalized[slice_index]
-    
-    return ct_slice, slice_index
+    return ct_normalized
 
 def segment_nodule_from_array(model, ct_slice):
     """Segment nodule from a CT slice array"""
@@ -258,26 +259,6 @@ def segment_nodule_from_array(model, ct_slice):
     
     # Resize back to original dimensions
     return resize(mask, ct_slice.shape[:2], order=0, preserve_range=True)
-
-def extract_all_slices(ct_array, spacing, origin):
-    """Extract and normalize all slices from a CT scan"""
-    window_min, window_max = -1000.0, 400.0
-    ct_normalized = np.clip(ct_array, window_min, window_max)
-    ct_normalized = (ct_normalized - window_min) / (window_max - window_min)
-    
-    slices = []
-    for i in range(ct_normalized.shape[0]):
-        slices.append(ct_normalized[i])
-    
-    return slices
-
-# ========== HELPER FUNCTIONS ==========
-def convert_to_grayscale(image):
-    if image.mode == 'RGBA':
-        image = image.convert('RGB')
-    if image.mode != 'L':
-        image = image.convert('L')
-    return np.array(image)
 
 def calculate_volume(mask, pixel_spacing_mm=0.7, slice_thickness_mm=1.25):
     """Calculate nodule volume in mm³"""
@@ -314,19 +295,13 @@ else:
         st.session_state.logged_in = False
         st.rerun()
     
-    # Model architecture details in sidebar
+    # Model architecture details
     st.sidebar.markdown("---")
     st.sidebar.markdown("**🧠 Model Architecture**")
-    st.sidebar.markdown("Encoder Path:")
-    st.sidebar.markdown("- Input: 1x512x512")
-    st.sidebar.markdown("- 32 channels")
-    st.sidebar.markdown("- 64 channels")
-    st.sidebar.markdown("- 128 channels")
-    st.sidebar.markdown("- 256 channels")
-    st.sidebar.markdown("- 256 channels")
-    st.sidebar.markdown("")
-    st.sidebar.markdown("Decoder Path:")
-    st.sidebar.markdown("- 256 → 128 → 64 → 32 → 1")
+    st.sidebar.markdown("- Memory Efficient U-Net")
+    st.sidebar.markdown("- 3.4M parameters")
+    st.sidebar.markdown("- 32 → 64 → 128 → 256 → 256 channels")
+    st.sidebar.markdown("- Input: 512×512")
     
     # Load model
     model, model_loaded = load_model()
@@ -337,70 +312,72 @@ else:
     # File upload section
     st.subheader("📤 Upload CT Scan")
     
-    # Option to choose upload type
     upload_type = st.radio(
         "Select upload format:",
-        ["Single Image (PNG/JPG)", "MHD + RAW Files", "ZIP Archive (MHD+RAW)"],
+        ["Single Image (PNG/JPG)", "MHD + RAW Files (Select both at once)", "ZIP Archive (MHD+RAW)"],
         horizontal=True
     )
     
     ct_data = None
-    original_array = None
-    spacing_info = None
-    origin_info = None
     
     if upload_type == "Single Image (PNG/JPG)":
         uploaded = st.file_uploader("Choose CT image", type=["png", "jpg", "jpeg"])
         
         if uploaded:
             image = Image.open(uploaded)
-            original_array = convert_to_grayscale(image)
+            if image.mode == 'RGBA':
+                image = image.convert('RGB')
+            if image.mode != 'L':
+                image = image.convert('L')
+            original_array = np.array(image)
             st.image(original_array, caption="Uploaded CT Image", use_container_width=True)
             ct_data = original_array
     
-    elif upload_type == "MHD + RAW Files":
-        st.info("📌 Upload both the .mhd and .raw files. Make sure they have the same base name.")
+    elif upload_type == "MHD + RAW Files (Select both at once)":
+        st.info("📌 Select both the .mhd and .raw files together (Ctrl+Click or Shift+Click to select multiple files)")
         
-        col1, col2 = st.columns(2)
-        with col1:
-            mhd_file = st.file_uploader("Choose .mhd file", type=["mhd"])
-        with col2:
-            raw_file = st.file_uploader("Choose .raw file", type=["raw"])
+        uploaded_files = st.file_uploader(
+            "Choose .mhd and .raw files",
+            type=["mhd", "raw"],
+            accept_multiple_files=True
+        )
         
-        if mhd_file is not None:
-            if raw_file is not None:
-                with st.spinner("Loading MHD file..."):
-                    ct_array, spacing, origin, itk_image = load_mhd_file(mhd_file, raw_file)
+        if uploaded_files and len(uploaded_files) >= 2:
+            with st.spinner("Loading MHD/RAW files..."):
+                ct_array, spacing, origin = load_mhd_files_from_uploads(uploaded_files)
+                
+                if ct_array is not None:
+                    st.success("✅ Successfully loaded CT scan!")
+                    st.info(f"📊 Scan dimensions: {ct_array.shape[0]} slices × {ct_array.shape[1]} × {ct_array.shape[2]}")
                     
-                    if ct_array is not None:
-                        st.success(f"✅ Successfully loaded CT scan!")
-                        st.info(f"📊 Scan info:\n"
-                               f"• Dimensions: {ct_array.shape[0]} slices × {ct_array.shape[1]} × {ct_array.shape[2]}\n"
-                               f"• Spacing: ({spacing[0]:.3f}, {spacing[1]:.3f}, {spacing[2]:.3f}) mm\n"
-                               f"• Origin: ({origin[0]:.1f}, {origin[1]:.1f}, {origin[2]:.1f})")
-                        
-                        # Process and display a preview slice
-                        ct_slice, slice_idx = process_ct_scan(ct_array, spacing, origin)
-                        original_array = ct_slice
-                        ct_data = ct_array
-                        spacing_info = spacing
-                        origin_info = origin
-                        st.session_state['ct_array'] = ct_array
-                        st.session_state['spacing'] = spacing
-                        st.session_state['origin'] = origin
-                        st.session_state['current_slice'] = slice_idx
-                        
-                        # Show preview
-                        st.subheader("📷 Preview Slice")
-                        fig, ax = plt.subplots(figsize=(6, 6))
-                        ax.imshow(ct_slice, cmap='gray')
-                        ax.set_title(f"Slice {slice_idx} of {ct_array.shape[0]}")
-                        ax.axis('off')
-                        st.pyplot(fig)
-                    else:
-                        st.error("Failed to load MHD file")
-            else:
-                st.warning("Please upload both .mhd and .raw files")
+                    # Process and show preview
+                    ct_normalized = process_ct_scan(ct_array)
+                    
+                    # Find best slice (with most variation)
+                    slice_std = [np.std(ct_normalized[i]) for i in range(min(ct_normalized.shape[0], 100))]
+                    best_slice = np.argmax(slice_std)
+                    
+                    st.session_state['ct_array'] = ct_normalized
+                    st.session_state['ct_array_raw'] = ct_array
+                    st.session_state['spacing'] = spacing
+                    st.session_state['origin'] = origin
+                    st.session_state['num_slices'] = ct_array.shape[0]
+                    st.session_state['best_slice'] = best_slice
+                    
+                    # Show preview
+                    st.subheader("📷 Preview Slice")
+                    fig, ax = plt.subplots(figsize=(6, 6))
+                    ax.imshow(ct_normalized[best_slice], cmap='gray')
+                    ax.set_title(f"Slice {best_slice} of {ct_array.shape[0]} (Preview)")
+                    ax.axis('off')
+                    st.pyplot(fig)
+                    
+                    ct_data = ct_normalized
+                else:
+                    st.error("Failed to load MHD/RAW files. Make sure you selected both .mhd and .raw files.")
+        
+        elif uploaded_files and len(uploaded_files) < 2:
+            st.warning("Please select both .mhd and .raw files (you need to select 2 files)")
     
     elif upload_type == "ZIP Archive (MHD+RAW)":
         zip_file = st.file_uploader("Choose ZIP file containing .mhd and .raw", type=["zip"])
@@ -408,103 +385,90 @@ else:
         if zip_file is not None:
             with st.spinner("Extracting and loading ZIP archive..."):
                 try:
-                    # Save zip to temp file
-                    with tempfile.NamedTemporaryFile(delete=False, suffix='.zip') as tmp_zip:
-                        tmp_zip.write(zip_file.getvalue())
-                        zip_path = tmp_zip.name
-                    
-                    # Extract zip
-                    extract_dir = tempfile.mkdtemp()
-                    with zipfile.ZipFile(zip_path, 'r') as zf:
-                        zf.extractall(extract_dir)
-                    
-                    # Find .mhd and .raw files
-                    mhd_file_path = None
-                    raw_file_path = None
-                    
-                    for file in os.listdir(extract_dir):
-                        if file.endswith('.mhd'):
-                            mhd_file_path = os.path.join(extract_dir, file)
-                        elif file.endswith('.raw'):
-                            raw_file_path = os.path.join(extract_dir, file)
-                    
-                    if mhd_file_path and raw_file_path:
-                        # Load the MHD file
-                        itk_image = sitk.ReadImage(mhd_file_path)
-                        ct_array = sitk.GetArrayFromImage(itk_image)
-                        spacing = itk_image.GetSpacing()
-                        origin = itk_image.GetOrigin()
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        # Save zip file
+                        zip_path = os.path.join(tmpdir, "upload.zip")
+                        with open(zip_path, 'wb') as f:
+                            f.write(zip_file.getvalue())
                         
-                        # Reorder to (z, y, x)
-                        spacing = (spacing[2], spacing[1], spacing[0])
-                        origin = (origin[2], origin[1], origin[0])
+                        # Extract zip
+                        with zipfile.ZipFile(zip_path, 'r') as zf:
+                            zf.extractall(tmpdir)
                         
-                        st.success(f"✅ Successfully loaded CT scan from ZIP!")
-                        st.info(f"📊 Scan info:\n"
-                               f"• Dimensions: {ct_array.shape[0]} slices × {ct_array.shape[1]} × {ct_array.shape[2]}\n"
-                               f"• Spacing: ({spacing[0]:.3f}, {spacing[1]:.3f}, {spacing[2]:.3f}) mm")
+                        # Find .mhd and .raw files
+                        mhd_path = None
+                        raw_path = None
                         
-                        # Process preview slice
-                        ct_slice, slice_idx = process_ct_scan(ct_array, spacing, origin)
-                        original_array = ct_slice
-                        ct_data = ct_array
-                        spacing_info = spacing
-                        origin_info = origin
-                        st.session_state['ct_array'] = ct_array
-                        st.session_state['spacing'] = spacing
-                        st.session_state['origin'] = origin
-                        st.session_state['current_slice'] = slice_idx
+                        for file in os.listdir(tmpdir):
+                            if file.endswith('.mhd'):
+                                mhd_path = os.path.join(tmpdir, file)
+                            elif file.endswith('.raw'):
+                                raw_path = os.path.join(tmpdir, file)
                         
-                        st.subheader("📷 Preview Slice")
-                        fig, ax = plt.subplots(figsize=(6, 6))
-                        ax.imshow(ct_slice, cmap='gray')
-                        ax.set_title(f"Slice {slice_idx} of {ct_array.shape[0]}")
-                        ax.axis('off')
-                        st.pyplot(fig)
-                    
-                    # Cleanup
-                    os.unlink(zip_path)
-                    import shutil
-                    shutil.rmtree(extract_dir)
-                    
+                        if mhd_path and raw_path:
+                            # Read the MHD file with SimpleITK
+                            itk_image = sitk.ReadImage(mhd_path)
+                            ct_array = sitk.GetArrayFromImage(itk_image)
+                            
+                            # Get metadata
+                            spacing = itk_image.GetSpacing()
+                            origin = itk_image.GetOrigin()
+                            
+                            # Reorder to (z, y, x)
+                            spacing = (spacing[2], spacing[1], spacing[0])
+                            origin = (origin[2], origin[1], origin[0])
+                            
+                            st.success("✅ Successfully loaded CT scan from ZIP!")
+                            st.info(f"📊 Scan dimensions: {ct_array.shape[0]} slices × {ct_array.shape[1]} × {ct_array.shape[2]}")
+                            
+                            ct_normalized = process_ct_scan(ct_array)
+                            
+                            slice_std = [np.std(ct_normalized[i]) for i in range(min(ct_normalized.shape[0], 100))]
+                            best_slice = np.argmax(slice_std)
+                            
+                            st.session_state['ct_array'] = ct_normalized
+                            st.session_state['ct_array_raw'] = ct_array
+                            st.session_state['spacing'] = spacing
+                            st.session_state['origin'] = origin
+                            st.session_state['num_slices'] = ct_array.shape[0]
+                            st.session_state['best_slice'] = best_slice
+                            
+                            st.subheader("📷 Preview Slice")
+                            fig, ax = plt.subplots(figsize=(6, 6))
+                            ax.imshow(ct_normalized[best_slice], cmap='gray')
+                            ax.set_title(f"Slice {best_slice} of {ct_array.shape[0]}")
+                            ax.axis('off')
+                            st.pyplot(fig)
+                            
+                            ct_data = ct_normalized
+                        else:
+                            st.error("ZIP file must contain both .mhd and .raw files")
+                            
                 except Exception as e:
-                    st.error(f"Error loading ZIP file: {e}")
+                    st.error(f"Error loading ZIP file: {str(e)}")
     
-    # Segmentation section
-    if ct_data is not None:
+    # Segmentation section for 3D CT data
+    if ct_data is not None and len(np.array(ct_data).shape) == 3:
+        # 3D CT data - add slice selector
+        num_slices = st.session_state.get('num_slices', ct_data.shape[0])
+        default_slice = st.session_state.get('best_slice', num_slices // 2)
+        
+        slice_num = st.slider(
+            "Select slice to segment:",
+            min_value=0,
+            max_value=num_slices - 1,
+            value=min(default_slice, num_slices - 1)
+        )
+        
+        current_slice_img = ct_data[slice_num]
+        st.image(current_slice_img, caption=f"CT Slice {slice_num} of {num_slices}", use_container_width=True)
+        
         col_left, col_right = st.columns(2)
         
         with col_left:
-            # For 3D CT data, add slice selector
-            if upload_type != "Single Image (PNG/JPG)" and 'ct_array' in st.session_state:
-                ct_array_full = st.session_state['ct_array']
-                max_slice = ct_array_full.shape[0] - 1
-                
-                slice_num = st.slider(
-                    "Select slice to segment:",
-                    min_value=0,
-                    max_value=max_slice,
-                    value=st.session_state.get('current_slice', max_slice // 2)
-                )
-                
-                # Process the selected slice
-                window_min, window_max = -1000.0, 400.0
-                ct_normalized = np.clip(ct_array_full, window_min, window_max)
-                ct_normalized = (ct_normalized - window_min) / (window_max - window_min)
-                current_slice_img = ct_normalized[slice_num]
-                
-                st.image(current_slice_img, caption=f"CT Slice {slice_num}", use_container_width=True)
-            else:
-                current_slice_img = original_array
-                slice_num = 0
-            
             if st.button("🔍 Segment Nodule", type="primary"):
                 with st.spinner("Segmenting with AI model..."):
-                    if upload_type == "Single Image (PNG/JPG)":
-                        mask = segment_nodule_from_array(model, original_array)
-                    else:
-                        mask = segment_nodule_from_array(model, current_slice_img)
-                    
+                    mask = segment_nodule_from_array(model, current_slice_img)
                     volume = calculate_volume(mask)
                     st.session_state['mask'] = mask
                     st.session_state['volume'] = volume
@@ -521,7 +485,7 @@ else:
                 with tab1:
                     fig, ax = plt.subplots(figsize=(5, 5))
                     ax.imshow(st.session_state['mask'], cmap='gray')
-                    ax.set_title("White = Nodule Detected, Black = Background")
+                    ax.set_title("White = Nodule, Black = Background")
                     ax.axis('off')
                     st.pyplot(fig)
                     
@@ -531,7 +495,7 @@ else:
                     plt.axis('off')
                     plt.savefig(buf, format='png', bbox_inches='tight', dpi=150)
                     buf.seek(0)
-                    st.download_button("📥 Download Mask", buf, f"nodule_mask_slice_{st.session_state['slice_num']}.png", mime="image/png")
+                    st.download_button("📥 Download Mask", buf, f"mask_slice_{st.session_state['slice_num']}.png")
                 
                 with tab2:
                     original = st.session_state['current_image']
@@ -567,40 +531,50 @@ else:
                     else:
                         st.error("🚨 **Large nodule** - Urgent consultation recommended. Consider biopsy or surgical referral.")
     
+    elif ct_data is not None:
+        # 2D image data
+        col_left, col_right = st.columns(2)
+        
+        with col_left:
+            if st.button("🔍 Segment Nodule", type="primary"):
+                with st.spinner("Segmenting with AI model..."):
+                    mask = segment_nodule_from_array(model, ct_data)
+                    volume = calculate_volume(mask)
+                    st.session_state['mask'] = mask
+                    st.session_state['volume'] = volume
+                    st.session_state['current_image'] = ct_data
+                st.success("Segmentation complete!")
+        
+        with col_right:
+            st.subheader("📊 Results")
+            
+            if 'mask' in st.session_state:
+                tab1, tab2, tab3 = st.tabs(["🎭 Binary Mask", "🔴 Overlay", "📈 Clinical Metrics"])
+                
+                with tab1:
+                    fig, ax = plt.subplots(figsize=(5, 5))
+                    ax.imshow(st.session_state['mask'], cmap='gray')
+                    ax.axis('off')
+                    st.pyplot(fig)
+                
+                with tab2:
+                    original = st.session_state['current_image']
+                    mask = st.session_state['mask']
+                    if original.shape != mask.shape:
+                        mask = resize(mask, original.shape, order=0, preserve_range=True)
+                    
+                    original_norm = (original - original.min()) / (original.max() - original.min() + 1e-8)
+                    overlay = np.stack([original_norm] * 3, axis=-1)
+                    overlay[:, :, 0] = np.where(mask > 0.5, 1.0, overlay[:, :, 0])
+                    overlay[:, :, 1] = np.where(mask > 0.5, 0.0, overlay[:, :, 1])
+                    overlay[:, :, 2] = np.where(mask > 0.5, 0.0, overlay[:, :, 2])
+                    
+                    st.image(overlay, use_container_width=True)
+                
+                with tab3:
+                    area_pct = (np.sum(st.session_state['mask'] > 0.5) / st.session_state['mask'].size) * 100
+                    st.metric("Estimated Volume", f"{st.session_state['volume']:.2f} mm³")
+                    st.metric("Relative Area", f"{area_pct:.2f}%")
+    
     st.markdown("---")
-    st.caption("© 2026 HIT500 Capstone Project | Model: Memory Efficient U-Net | Trained on LUNA16")
-
-# ========== INSTRUCTIONS EXPANDER ==========
-with st.expander("ℹ️ How to use this application"):
-    st.markdown("""
-    ### Quick Start Guide
-    
-    1. **Login** using credentials: `radiologist` / `hit500`
-    2. **Choose upload format**:
-       - **Single Image**: Upload PNG/JPG of a CT slice
-       - **MHD + RAW**: Upload both files from LUNA16 dataset
-       - **ZIP Archive**: Upload a ZIP containing both .mhd and .raw
-    3. **For 3D CT scans**: Use the slider to select which slice to analyze
-    4. Click **"Segment Nodule"** to run the AI model
-    5. Review results in three tabs
-    
-    ### About MHD/RAW Format
-    
-    The LUNA16 dataset uses this format:
-    - **.mhd** (MetaHeader): Contains metadata like spacing, origin, dimensions
-    - **.raw**: Contains the actual pixel data
-    
-    SimpleITK automatically reads both files when you load the .mhd file.
-    
-    ### Model Information
-    
-    - **Architecture**: Memory Efficient U-Net
-    - **Parameters**: 3.4 million
-    - **Input Size**: 512x512 grayscale
-    - **Training Data**: LUNA16 dataset
-    - **Performance**: 0.64 Dice score
-    
-    ### Clinical Use
-    
-    This tool assists radiologists in automated nodule detection and volume measurement.
-    """)
+    st.caption("© 2026 HIT500 Capstone Project | Model: Memory Efficient U-Net (3.4M params) | Trained on LUNA16")
