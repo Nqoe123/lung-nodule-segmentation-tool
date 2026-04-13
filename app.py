@@ -9,6 +9,7 @@ import io
 import os
 import gdown
 from skimage.transform import resize
+from skimage.measure import label, regionprops
 import tempfile
 import zipfile
 import SimpleITK as sitk
@@ -189,10 +190,12 @@ def load_mhd_files(uploaded_files):
         st.error(f"Error loading files: {str(e)}")
         return None, None, None
 
-# ========== NODULE DETECTION ==========
-def detect_nodules(model, ct_volume):
-    """Automatically detect all nodules"""
-    detections = []
+# ========== NODULE DETECTION WITH MULTIPLE NODULES PER SLICE ==========
+def detect_nodules(model, ct_volume, min_area=20):
+    """
+    Detect multiple nodules per slice using connected component analysis
+    """
+    all_detections = []
     
     with st.spinner("🔍 Analyzing CT scan for nodules..."):
         progress_bar = st.progress(0)
@@ -210,41 +213,62 @@ def detect_nodules(model, ct_volume):
             with torch.no_grad():
                 output = model(input_tensor)
                 probs = torch.sigmoid(output)
-                mask = (probs > 0.5).float().squeeze().numpy()
+                binary_mask = (probs > 0.5).float().squeeze().numpy()
             
-            # Check for nodules
-            mask_original = resize(mask, slice_img.shape[:2], order=0, preserve_range=True)
-            nodule_area = np.sum(mask_original)
+            # Resize mask back to original dimensions
+            mask_original = resize(binary_mask, slice_img.shape[:2], order=0, preserve_range=True)
             
-            if nodule_area > 30:  # Minimum area threshold
-                confidence = min(0.95, nodule_area / 300)
-                detections.append({
-                    'slice': i,
-                    'area_pixels': nodule_area,
-                    'confidence': confidence,
-                    'mask': mask_original,
-                    'slice_image': slice_img
-                })
+            # Find connected components (individual nodules)
+            labeled_mask = label(mask_original > 0.5)
+            
+            if labeled_mask.max() > 0:
+                # Get properties of each connected component
+                props = regionprops(labeled_mask)
+                
+                for region in props:
+                    nodule_area = region.area
+                    
+                    if nodule_area >= min_area:
+                        # Create individual mask for this nodule
+                        individual_mask = (labeled_mask == region.label).astype(np.float32)
+                        
+                        # Calculate confidence based on area
+                        confidence = min(0.95, nodule_area / 300)
+                        
+                        # Get bounding box for cropping
+                        minr, minc, maxr, maxc = region.bbox
+                        
+                        all_detections.append({
+                            'slice': i,
+                            'area_pixels': nodule_area,
+                            'confidence': confidence,
+                            'mask': individual_mask,
+                            'slice_image': slice_img,
+                            'bbox': (minr, minc, maxr, maxc),
+                            'centroid': region.centroid
+                        })
         
         progress_bar.empty()
     
     # Sort by confidence
-    detections.sort(key=lambda x: x['confidence'], reverse=True)
-    return detections
+    all_detections.sort(key=lambda x: x['confidence'], reverse=True)
+    return all_detections
 
 def calculate_volume(mask, pixel_spacing_mm=0.7):
+    """Calculate nodule volume in mm³"""
     pixel_area_mm2 = pixel_spacing_mm ** 2
     area_pixels = np.sum(mask)
     return area_pixels * pixel_area_mm2 * 1.25  # Default slice thickness 1.25mm
 
 def calculate_diameter(area_pixels, pixel_spacing_mm=0.7):
+    """Calculate approximate diameter in mm"""
     area_mm2 = area_pixels * (pixel_spacing_mm ** 2)
     return 2 * np.sqrt(area_mm2 / np.pi)
 
 # ========== MAIN UI ==========
 def main():
     st.title("🫁 Lung Nodule Segmentation")
-    st.markdown("### Upload CT Scan - AI Automatically Detects Nodules")
+    st.markdown("### Upload CT Scan - AI Automatically Detects All Nodules")
     st.markdown("---")
     
     # Login
@@ -277,7 +301,7 @@ def main():
     if not model_loaded:
         st.stop()
     
-    # File upload - simple and clean
+    # File upload
     uploaded_files = st.file_uploader(
         "Select .mhd and .raw files (select both at once)",
         type=["mhd", "raw"],
@@ -308,18 +332,29 @@ def main():
                 if detections:
                     st.success(f"✅ Found {len(detections)} nodule(s)")
                     
-                    # Show results
-                    for idx, d in enumerate(detections):
-                        volume = calculate_volume(d['mask'])
-                        diameter = calculate_diameter(d['area_pixels'])
+                    # Group detections by slice for better display
+                    from collections import defaultdict
+                    detections_by_slice = defaultdict(list)
+                    for d in detections:
+                        detections_by_slice[d['slice']].append(d)
+                    
+                    # Show results by slice
+                    for slice_num in sorted(detections_by_slice.keys()):
+                        slice_detections = detections_by_slice[slice_num]
                         
-                        with st.container():
-                            st.markdown(f"### Nodule {idx+1} - Slice {d['slice']}")
+                        st.markdown(f"### Slice {slice_num} - {len(slice_detections)} Nodule(s)")
+                        
+                        # Create a grid for multiple nodules on same slice
+                        if len(slice_detections) == 1:
+                            # Single nodule - full width
+                            d = slice_detections[0]
+                            volume = calculate_volume(d['mask'])
+                            diameter = calculate_diameter(d['area_pixels'])
                             
                             col1, col2 = st.columns([2, 1])
                             
                             with col1:
-                                # Create overlay
+                                # Create overlay with bounding box
                                 slice_norm = (d['slice_image'] - d['slice_image'].min()) / (d['slice_image'].max() - d['slice_image'].min() + 1e-8)
                                 overlay = np.stack([slice_norm] * 3, axis=-1)
                                 overlay[:, :, 0] = np.where(d['mask'] > 0.5, 1.0, overlay[:, :, 0])
@@ -333,22 +368,47 @@ def main():
                                 st.metric("Diameter", f"{diameter:.1f} mm")
                                 st.metric("Confidence", f"{d['confidence']:.0%}")
                                 
-                                # Clinical recommendation
                                 if volume < 100:
                                     st.info("📌 Small - Monitor")
                                 elif volume < 300:
                                     st.warning("⚠️ Medium - Follow up")
                                 else:
                                     st.error("🚨 Large - Urgent")
+                        
+                        else:
+                            # Multiple nodules - create columns
+                            cols = st.columns(len(slice_detections))
                             
-                            st.markdown("---")
+                            for idx, (col, d) in enumerate(zip(cols, slice_detections)):
+                                volume = calculate_volume(d['mask'])
+                                diameter = calculate_diameter(d['area_pixels'])
+                                
+                                with col:
+                                    # Create overlay
+                                    slice_norm = (d['slice_image'] - d['slice_image'].min()) / (d['slice_image'].max() - d['slice_image'].min() + 1e-8)
+                                    overlay = np.stack([slice_norm] * 3, axis=-1)
+                                    overlay[:, :, 0] = np.where(d['mask'] > 0.5, 1.0, overlay[:, :, 0])
+                                    overlay[:, :, 1] = np.where(d['mask'] > 0.5, 0.0, overlay[:, :, 1])
+                                    overlay[:, :, 2] = np.where(d['mask'] > 0.5, 0.0, overlay[:, :, 2])
+                                    
+                                    st.image(overlay, use_container_width=True)
+                                    st.caption(f"Nodule {idx+1}")
+                                    st.metric("Volume", f"{volume:.1f} mm³")
+                                    st.metric("Diameter", f"{diameter:.1f} mm")
+                                    st.metric("Confidence", f"{d['confidence']:.0%}")
+                        
+                        st.markdown("---")
                     
                     # Download all results
+                    report_lines = [f"Nodules Found: {len(detections)}", ""]
+                    for i, d in enumerate(detections):
+                        volume = calculate_volume(d['mask'])
+                        diameter = calculate_diameter(d['area_pixels'])
+                        report_lines.append(f"Nodule {i+1}: Slice {d['slice']}, Volume: {volume:.1f}mm³, Diameter: {diameter:.1f}mm, Confidence: {d['confidence']:.0%}")
+                    
                     st.download_button(
                         "📊 Download Full Report",
-                        f"Nodules Found: {len(detections)}\n\n" + 
-                        "\n".join([f"Nodule {i+1}: Slice {d['slice']}, Volume: {calculate_volume(d['mask']):.1f}mm³, Confidence: {d['confidence']:.0%}" 
-                                  for i, d in enumerate(detections)]),
+                        "\n".join(report_lines),
                         "nodule_report.txt"
                     )
                 else:
