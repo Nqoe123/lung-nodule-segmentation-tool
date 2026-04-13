@@ -12,7 +12,7 @@ from skimage.transform import resize
 
 # ========== GOOGLE DRIVE SETUP ==========
 GOOGLE_DRIVE_FILE_ID = "1FdIozNEVbIPUsjcdReAfmbgN3Nisx9yQ"  # Replace with your actual FILE ID
-MODEL_FILENAME = "best_unet_model.pth"
+MODEL_FILENAME = "checkpoint_epoch_90.pth"  # Changed to match your file
 
 def download_model_from_drive():
     if not os.path.exists(MODEL_FILENAME):
@@ -109,7 +109,7 @@ class UNet(nn.Module):
         x = self.up3(x, x2)
         x = self.up4(x, x1)
         logits = self.outc(x)
-        return logits  # Return logits, not sigmoid (BCEWithLogitsLoss expects logits)
+        return logits  # Return logits, not sigmoid
 
 # ========== LOAD MODEL ==========
 @st.cache_resource
@@ -121,12 +121,14 @@ def load_model():
         # Load checkpoint
         checkpoint = torch.load(model_path, map_location='cpu')
         
-        # Extract state dict (handle different save formats)
+        # Extract state dict from checkpoint
         if 'model_state_dict' in checkpoint:
             state_dict = checkpoint['model_state_dict']
+            epoch = checkpoint.get('epoch', 'Unknown')
             best_dice = checkpoint.get('best_dice', 'Unknown')
         else:
             state_dict = checkpoint
+            epoch = 'Unknown'
             best_dice = 'Unknown'
         
         # Handle DataParallel wrapper if present
@@ -144,9 +146,10 @@ def load_model():
         
         # Calculate and display model info
         total_params = sum(p.numel() for p in model.parameters())
-        st.sidebar.success(f"✅ Model loaded successfully!")
-        st.sidebar.info(f"Model Stats:\n"
+        st.sidebar.success("✅ Model loaded successfully!")
+        st.sidebar.info(f"📊 Model Stats:\n"
                        f"• Parameters: {total_params/1e6:.1f}M\n"
+                       f"• Checkpoint: Epoch {epoch}\n"
                        f"• Best Dice: {best_dice}\n"
                        f"• Architecture: Memory Efficient U-Net")
         
@@ -156,9 +159,9 @@ def load_model():
         st.error(f"Error loading model: {e}")
         st.info("""
         **Troubleshooting:**
-        1. Make sure you uploaded the correct model file to Google Drive
+        1. Make sure you uploaded 'checkpoint_epoch_90.pth' to Google Drive
         2. Update the GOOGLE_DRIVE_FILE_ID with your actual file ID
-        3. The model should be saved from the training script as 'best_model.pth'
+        3. The file should be from your training output
         
         **To get the FILE_ID:**
         - Upload your model to Google Drive
@@ -350,7 +353,7 @@ else:
                             "• High priority follow-up needed")
     
     st.markdown("---")
-    st.caption("© 2026 HIT500 Capstone Project | Model: Memory Efficient U-Net (3.4M params) | Trained on LUNA16 dataset")
+    st.caption("© 2026 HIT500 Capstone Project | Model: Memory Efficient U-Net (3.4M params) | Trained on LUNA16")
 
 # ========== INSTRUCTIONS EXPANDER ==========
 with st.expander("ℹ️ How to use this application"):
@@ -372,6 +375,7 @@ with st.expander("ℹ️ How to use this application"):
     - **Parameters**: 3.4 million (87% smaller than standard U-Net)
     - **Training Data**: LUNA16 dataset (902 CT slices, 601 scans)
     - **Input Size**: 512x512 grayscale
+    - **Checkpoint**: Epoch 90 from training
     - **Performance**: 0.64 Dice score on validation set
     
     ### Technical Details
