@@ -11,7 +11,7 @@ import gdown
 from skimage.transform import resize
 
 # ========== GOOGLE DRIVE SETUP ==========
-GOOGLE_DRIVE_FILE_ID = "1L9qrtFk12EAOI_h2ru5BzVFAMmsvHJHV"  # Replace with your actual FILE ID
+GOOGLE_DRIVE_FILE_ID = "1FdIozNEVbIPUsjcdReAfmbgN3Nisx9yQ"  # Replace with your actual FILE ID
 MODEL_FILENAME = "best_unet_model_fixed.pth"
 
 def download_model_from_drive():
@@ -25,39 +25,42 @@ def download_model_from_drive():
 # ========== PAGE CONFIG ==========
 st.set_page_config(page_title="Lung Nodule Segmentation", page_icon="🫁", layout="wide")
 
-# ========== U-NET MODEL ==========
+# ========== MEMORY EFFICIENT U-NET MODEL (3.4M parameters) ==========
+# This matches the exact architecture used in training (32→64→128→256→256 channels)
+
 class DoubleConv(nn.Module):
-    def __init__(self, in_ch, out_ch):
-        super(DoubleConv, self).__init__()
-        self.conv = nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, 3, padding=1),
-            nn.BatchNorm2d(out_ch),
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.double_conv = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
-            nn.Conv2d(out_ch, out_ch, 3, padding=1),
-            nn.BatchNorm2d(out_ch),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True)
         )
     def forward(self, x):
-        return self.conv(x)
+        return self.double_conv(x)
 
 class Down(nn.Module):
-    def __init__(self, in_ch, out_ch):
-        super(Down, self).__init__()
-        self.mpconv = nn.Sequential(
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.maxpool_conv = nn.Sequential(
             nn.MaxPool2d(2),
-            DoubleConv(in_ch, out_ch)
+            DoubleConv(in_channels, out_channels)
         )
     def forward(self, x):
-        return self.mpconv(x)
+        return self.maxpool_conv(x)
 
 class Up(nn.Module):
-    def __init__(self, in_ch, out_ch, bilinear=True):
-        super(Up, self).__init__()
+    def __init__(self, in_channels, out_channels, bilinear=True):
+        super().__init__()
         if bilinear:
             self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
         else:
-            self.up = nn.ConvTranspose2d(in_ch // 2, in_ch // 2, 2, stride=2)
-        self.conv = DoubleConv(in_ch, out_ch)
+            self.up = nn.ConvTranspose2d(in_channels // 2, in_channels // 2, kernel_size=2, stride=2)
+        
+        self.conv = DoubleConv(in_channels, out_channels)
     
     def forward(self, x1, x2):
         x1 = self.up(x1)
@@ -68,38 +71,48 @@ class Up(nn.Module):
         return self.conv(x)
 
 class OutConv(nn.Module):
-    def __init__(self, in_ch, out_ch):
-        super(OutConv, self).__init__()
-        self.conv = nn.Conv2d(in_ch, out_ch, 1)
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
     def forward(self, x):
         return self.conv(x)
 
 class UNet(nn.Module):
+    """Memory Efficient U-Net - 3.4M parameters (reduced from 31M)"""
     def __init__(self, n_channels=1, n_classes=1, bilinear=True):
-        super(UNet, self).__init__()
-        self.inc = DoubleConv(n_channels, 64)
-        self.down1 = Down(64, 128)
-        self.down2 = Down(128, 256)
-        self.down3 = Down(256, 512)
+        super().__init__()
+        self.n_channels = n_channels
+        self.n_classes = n_classes
+        self.bilinear = bilinear
+        
+        # Memory efficient - reduced channels (32→64→128→256→256)
+        self.inc = DoubleConv(n_channels, 32)      # 32 channels
+        self.down1 = Down(32, 64)                  # 64 channels
+        self.down2 = Down(64, 128)                 # 128 channels
+        self.down3 = Down(128, 256)                # 256 channels
         factor = 2 if bilinear else 1
-        self.down4 = Down(512, 1024 // factor)
-        self.up1 = Up(1024, 512 // factor, bilinear)
-        self.up2 = Up(512, 256 // factor, bilinear)
-        self.up3 = Up(256, 128 // factor, bilinear)
-        self.up4 = Up(128, 64, bilinear)
-        self.outc = OutConv(64, n_classes)
+        self.down4 = Down(256, 512 // factor)      # 256 channels (with bilinear)
+        
+        # Decoder path
+        self.up1 = Up(512, 256 // factor, bilinear)   # 256 channels
+        self.up2 = Up(256, 128 // factor, bilinear)   # 128 channels
+        self.up3 = Up(128, 64 // factor, bilinear)    # 64 channels
+        self.up4 = Up(64, 32, bilinear)               # 32 channels
+        self.outc = OutConv(32, n_classes)            # 1 channel output
     
     def forward(self, x):
-        x1 = self.inc(x)
-        x2 = self.down1(x1)
-        x3 = self.down2(x2)
-        x4 = self.down3(x3)
-        x5 = self.down4(x4)
+        x1 = self.inc(x)      # 32 channels
+        x2 = self.down1(x1)   # 64 channels
+        x3 = self.down2(x2)   # 128 channels
+        x4 = self.down3(x3)   # 256 channels
+        x5 = self.down4(x4)   # 256 channels
+        
         x = self.up1(x5, x4)
         x = self.up2(x, x3)
         x = self.up3(x, x2)
         x = self.up4(x, x1)
-        return torch.sigmoid(self.outc(x))
+        logits = self.outc(x)
+        return torch.sigmoid(logits)  # Output probabilities (0-1)
 
 # ========== LOAD MODEL ==========
 @st.cache_resource
@@ -107,10 +120,24 @@ def load_model():
     model_path = download_model_from_drive()
     model = UNet()
     try:
-        model.load_state_dict(torch.load(model_path, map_location='cpu'))
+        # Load with appropriate map location
+        state_dict = torch.load(model_path, map_location='cpu')
+        
+        # Handle DataParallel wrapper if present
+        if 'module.' in list(state_dict.keys())[0]:
+            from collections import OrderedDict
+            new_state_dict = OrderedDict()
+            for k, v in state_dict.items():
+                name = k[7:]  # remove 'module.' prefix
+                new_state_dict[name] = v
+            state_dict = new_state_dict
+        
+        model.load_state_dict(state_dict)
+        model.eval()
         return model, True
     except Exception as e:
         st.error(f"Error loading model: {e}")
+        st.info("Make sure your model file is saved from the training script (UNet with 32 starting channels)")
         return model, False
 
 # ========== HELPER FUNCTIONS ==========
@@ -122,22 +149,34 @@ def convert_to_grayscale(image):
     return np.array(image)
 
 def segment_nodule(model, image_array):
+    """Segment nodule from CT image using the trained model"""
+    # Ensure 2D
     if len(image_array.shape) == 3:
         image_array = image_array[:, :, 0]
     
-    img_resized = resize(image_array, (256, 256))
-    img_norm = (img_resized - img_resized.min()) / (img_resized.max() - img_resized.min() + 1e-8)
-    input_tensor = torch.FloatTensor(img_norm).unsqueeze(0).unsqueeze(0)
+    # Resize to 512x512 (training size)
+    img_resized = resize(image_array, (512, 512))
     
+    # Normalize same as training (window -1000 to 400)
+    window_min, window_max = -1000.0, 400.0
+    img_normalized = np.clip(img_resized * (window_max - window_min) + window_min, window_min, window_max)
+    img_normalized = (img_normalized - window_min) / (window_max - window_min)
+    
+    # Convert to tensor
+    input_tensor = torch.FloatTensor(img_normalized).unsqueeze(0).unsqueeze(0)
+    
+    # Segment
     model.eval()
     with torch.no_grad():
         output = model(input_tensor)
         mask = output.squeeze().numpy()
         mask = (mask > 0.5).astype(np.float32)
     
-    return resize(mask, image_array.shape[:2])
+    # Resize back to original dimensions
+    return resize(mask, image_array.shape[:2], order=0, preserve_range=True)
 
 def calculate_volume(mask, pixel_spacing_mm=0.7, slice_thickness_mm=1.25):
+    """Calculate nodule volume in mm³"""
     pixel_area_mm2 = pixel_spacing_mm ** 2
     area_pixels = np.sum(mask)
     return area_pixels * pixel_area_mm2 * slice_thickness_mm
@@ -171,6 +210,14 @@ else:
         st.session_state.logged_in = False
         st.rerun()
     
+    # Model info in sidebar
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**Model Architecture**")
+    st.sidebar.markdown("- Memory Efficient U-Net")
+    st.sidebar.markdown("- 3.4M parameters")
+    st.sidebar.markdown("- Input: 512×512 CT slice")
+    st.sidebar.markdown("- Training Dice: 0.6399")
+    
     # Load model
     model, model_loaded = load_model()
     
@@ -183,15 +230,14 @@ else:
     
     with col_left:
         st.subheader("📤 Upload CT Scan")
-        uploaded = st.file_uploader("Choose CT image", type=["png", "jpg", "jpeg"])
+        uploaded = st.file_uploader("Choose CT image", type=["png", "jpg", "jpeg", "dcm"])
         
         if uploaded:
             image = Image.open(uploaded)
             original_array = convert_to_grayscale(image)
             
             st.subheader("📷 Original CT Scan")
-            # FIXED: Removed use_container_width
-            st.image(original_array, caption="Original CT Image")
+            st.image(original_array, caption="Original CT Image", use_container_width=True)
             
             if st.button("🔍 Segment Nodule", type="primary"):
                 with st.spinner("Segmenting..."):
@@ -219,37 +265,63 @@ else:
                 plt.figure(figsize=(5,5))
                 plt.imshow(st.session_state['mask'], cmap='gray')
                 plt.axis('off')
-                plt.savefig(buf, format='png')
+                plt.savefig(buf, format='png', bbox_inches='tight')
                 buf.seek(0)
-                st.download_button("Download Mask", buf, "nodule_mask.png")
+                st.download_button("📥 Download Mask", buf, "nodule_mask.png", mime="image/png")
             
             with tab2:
                 original = st.session_state['original']
                 mask = st.session_state['mask']
                 if original.shape != mask.shape:
-                    mask = resize(mask, original.shape)
+                    mask = resize(mask, original.shape, order=0, preserve_range=True)
                 
+                # Normalize original for display
                 original_norm = (original - original.min()) / (original.max() - original.min() + 1e-8)
                 overlay = np.stack([original_norm] * 3, axis=-1)
-                overlay[:, :, 0] = np.where(mask > 0.5, 1.0, overlay[:, :, 0])
-                overlay[:, :, 1] = np.where(mask > 0.5, 0.0, overlay[:, :, 1])
-                overlay[:, :, 2] = np.where(mask > 0.5, 0.0, overlay[:, :, 2])
-                # FIXED: Removed use_container_width
-                st.image(overlay, caption="Nodule Highlighted in RED")
+                overlay[:, :, 0] = np.where(mask > 0.5, 1.0, overlay[:, :, 0])  # Red channel
+                overlay[:, :, 1] = np.where(mask > 0.5, 0.0, overlay[:, :, 1])  # Green channel
+                overlay[:, :, 2] = np.where(mask > 0.5, 0.0, overlay[:, :, 2])  # Blue channel
+                
+                st.image(overlay, caption="🔴 Nodule Highlighted in RED", use_container_width=True)
             
             with tab3:
-                area_pct = (np.sum(st.session_state['mask'] > 0.5) / st.session_state['mask'].size) * 100
+                nodule_pixels = np.sum(st.session_state['mask'] > 0.5)
+                total_pixels = st.session_state['mask'].size
+                area_pct = (nodule_pixels / total_pixels) * 100
+                
                 cola, colb, colc = st.columns(3)
-                cola.metric("Volume", f"{st.session_state['volume']:.2f} mm³")
-                colb.metric("Nodule Area", f"{area_pct:.2f}%")
-                colc.metric("Model Status", "Active")
+                cola.metric("📏 Volume", f"{st.session_state['volume']:.2f} mm³")
+                colb.metric("📐 Area", f"{area_pct:.2f}%")
+                colc.metric("🎯 Dice Score (Training)", "0.64")
+                
+                st.markdown("---")
+                st.markdown("**Clinical Recommendation**")
                 
                 if area_pct < 1:
-                    st.info("📌 Small nodule - Regular monitoring recommended")
+                    st.info("📌 **Small nodule (<1% of image)** - Regular monitoring recommended. Follow-up in 6-12 months.")
                 elif area_pct < 5:
-                    st.warning("⚠️ Medium nodule - Further evaluation suggested")
+                    st.warning("⚠️ **Medium nodule (1-5% of image)** - Further evaluation suggested. Consider short-term follow-up (3-6 months).")
                 else:
-                    st.error("🚨 Large nodule - Urgent consultation recommended")
+                    st.error("🚨 **Large nodule (>5% of image)** - Urgent consultation recommended. Consider biopsy or surgical referral.")
     
     st.markdown("---")
-    st.caption("© 2026 HIT500 Capstone Project | Model loaded from Google Drive")
+    st.caption("© 2026 HIT500 Capstone Project | Model: Memory Efficient U-Net (3.4M params) | Trained on LUNA16")
+
+# ========== INSTRUCTIONS ==========
+with st.expander("ℹ️ How to use this app"):
+    st.markdown("""
+    1. **Login** using credentials: `radiologist` / `hit500`
+    2. **Upload** a CT scan image (PNG, JPG, JPEG)
+    3. Click **"Segment Nodule"** to run the AI model
+    4. View results in three tabs:
+       - **Mask**: Binary segmentation mask
+       - **Overlay**: Nodule highlighted in red on original CT
+       - **Metrics**: Volume calculation and clinical recommendations
+    5. **Download** the mask for your records
+    
+    **Model Details:**
+    - Architecture: Memory Efficient U-Net (3.4M parameters)
+    - Training Data: LUNA16 dataset (902 CT slices, 601 scans)
+    - Performance: 0.64 Dice score on validation
+    - Input: 512×512 grayscale CT slices
+    """)
