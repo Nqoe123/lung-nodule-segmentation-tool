@@ -11,7 +11,7 @@ import gdown
 from skimage.transform import resize
 
 # ========== GOOGLE DRIVE SETUP ==========
-GOOGLE_DRIVE_FILE_ID = "1L9qrtFk12EAOI_h2ru5BzVFAMmsvHJHV"  # Replace with your actual FILE ID
+GOOGLE_DRIVE_FILE_ID = "1FdIozNEVbIPUsjcdReAfmbgN3Nisx9yQ"  # Replace with your actual FILE ID
 MODEL_FILENAME = "best_unet_model.pth"
 
 def download_model_from_drive():
