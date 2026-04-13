@@ -6,4 +6,4 @@ pillow
 matplotlib
 scikit-image
 gdown
-simpleitk
+SimpleITK
