@@ -18,13 +18,13 @@ from collections import OrderedDict
 st.set_page_config(page_title="Lung Nodule Segmentation", page_icon="🫁", layout="wide")
 
 # ========== GOOGLE DRIVE SETUP ==========
-GOOGLE_DRIVE_FILE_ID = "1FdIozNEVbIPUsjcdReAfmbgN3Nisx9yQ"  # Your actual file ID
+GOOGLE_DRIVE_FILE_ID = "1FdIozNEVbIPUsjcdReAfmbgN3Nisx9yQ"
 MODEL_FILENAME = "checkpoint_epoch_90.pth"
 
 def download_model_from_drive():
     try:
         if not os.path.exists(MODEL_FILENAME):
-            with st.spinner("Downloading model from Google Drive..."):
+            with st.spinner("Downloading model..."):
                 url = f"https://drive.google.com/uc?id={GOOGLE_DRIVE_FILE_ID}"
                 gdown.download(url, MODEL_FILENAME, quiet=False)
         return MODEL_FILENAME
@@ -85,17 +85,12 @@ class OutConv(nn.Module):
 class UNet(nn.Module):
     def __init__(self, n_channels=1, n_classes=1, bilinear=True):
         super().__init__()
-        self.n_channels = n_channels
-        self.n_classes = n_classes
-        self.bilinear = bilinear
-        
         self.inc = DoubleConv(n_channels, 32)
         self.down1 = Down(32, 64)
         self.down2 = Down(64, 128)
         self.down3 = Down(128, 256)
         factor = 2 if bilinear else 1
         self.down4 = Down(256, 512 // factor)
-        
         self.up1 = Up(512, 256 // factor, bilinear)
         self.up2 = Up(256, 128 // factor, bilinear)
         self.up3 = Up(128, 64 // factor, bilinear)
@@ -108,13 +103,11 @@ class UNet(nn.Module):
         x3 = self.down2(x2)
         x4 = self.down3(x3)
         x5 = self.down4(x4)
-        
         x = self.up1(x5, x4)
         x = self.up2(x, x3)
         x = self.up3(x, x2)
         x = self.up4(x, x1)
-        logits = self.outc(x)
-        return logits
+        return self.outc(x)
 
 # ========== LOAD MODEL ==========
 @st.cache_resource
@@ -129,10 +122,8 @@ def load_model():
         
         if 'model_state_dict' in checkpoint:
             state_dict = checkpoint['model_state_dict']
-            best_dice = checkpoint.get('best_dice', 'Unknown')
         else:
             state_dict = checkpoint
-            best_dice = 'Unknown'
         
         if state_dict and 'module.' in list(state_dict.keys())[0]:
             new_state_dict = OrderedDict()
@@ -143,20 +134,13 @@ def load_model():
         
         model.load_state_dict(state_dict)
         model.eval()
-        
-        total_params = sum(p.numel() for p in model.parameters())
-        st.sidebar.success(f"✅ Model loaded! ({total_params/1e6:.1f}M params)")
-        st.sidebar.info(f"Best Dice: {best_dice}")
-        
         return model, True
-        
     except Exception as e:
         st.error(f"Error loading model: {str(e)}")
         return None, False
 
 # ========== MHD FILE LOADING ==========
-def load_mhd_files_from_uploads(uploaded_files):
-    """Load MHD and RAW files from multiple file uploads"""
+def load_mhd_files(uploaded_files):
     mhd_file = None
     raw_file = None
     
@@ -167,7 +151,6 @@ def load_mhd_files_from_uploads(uploaded_files):
             raw_file = uploaded_file
     
     if not mhd_file or not raw_file:
-        st.error("Please upload both .mhd and .raw files")
         return None, None, None
     
     try:
@@ -177,11 +160,10 @@ def load_mhd_files_from_uploads(uploaded_files):
             
             with open(mhd_path, 'wb') as f:
                 f.write(mhd_file.getvalue())
-            
             with open(raw_path, 'wb') as f:
                 f.write(raw_file.getvalue())
             
-            # Update MHD file to point to correct raw file
+            # Update MHD reference
             with open(mhd_path, 'r') as f:
                 mhd_content = f.read()
             
@@ -199,23 +181,20 @@ def load_mhd_files_from_uploads(uploaded_files):
             ct_array = sitk.GetArrayFromImage(itk_image)
             
             spacing = itk_image.GetSpacing()
-            origin = itk_image.GetOrigin()
-            
             spacing = (spacing[2], spacing[1], spacing[0])
-            origin = (origin[2], origin[1], origin[0])
             
-            return ct_array, spacing, origin
+            return ct_array, spacing, None
             
     except Exception as e:
         st.error(f"Error loading files: {str(e)}")
         return None, None, None
 
-# ========== AUTOMATIC NODULE DETECTION ==========
-def auto_detect_and_segment_nodules(model, ct_volume, min_area=50):
-    """Automatically detect and segment all nodules"""
+# ========== NODULE DETECTION ==========
+def detect_nodules(model, ct_volume):
+    """Automatically detect all nodules"""
     detections = []
     
-    with st.spinner("🔍 AI is analyzing the entire CT scan..."):
+    with st.spinner("🔍 Analyzing CT scan for nodules..."):
         progress_bar = st.progress(0)
         
         for i in range(ct_volume.shape[0]):
@@ -224,7 +203,7 @@ def auto_detect_and_segment_nodules(model, ct_volume, min_area=50):
             
             slice_img = ct_volume[i]
             
-            # Resize to 512x512
+            # Process slice
             img_resized = resize(slice_img, (512, 512), preserve_range=True)
             input_tensor = torch.FloatTensor(img_resized).unsqueeze(0).unsqueeze(0)
             
@@ -233,13 +212,12 @@ def auto_detect_and_segment_nodules(model, ct_volume, min_area=50):
                 probs = torch.sigmoid(output)
                 mask = (probs > 0.5).float().squeeze().numpy()
             
-            # Resize mask back
+            # Check for nodules
             mask_original = resize(mask, slice_img.shape[:2], order=0, preserve_range=True)
             nodule_area = np.sum(mask_original)
             
-            if nodule_area > min_area:
+            if nodule_area > 30:  # Minimum area threshold
                 confidence = min(0.95, nodule_area / 300)
-                
                 detections.append({
                     'slice': i,
                     'area_pixels': nodule_area,
@@ -250,26 +228,23 @@ def auto_detect_and_segment_nodules(model, ct_volume, min_area=50):
         
         progress_bar.empty()
     
+    # Sort by confidence
     detections.sort(key=lambda x: x['confidence'], reverse=True)
     return detections
 
-def calculate_volume(mask, pixel_spacing_mm=0.7, slice_thickness_mm=1.25):
-    """Calculate nodule volume in mm³"""
+def calculate_volume(mask, pixel_spacing_mm=0.7):
     pixel_area_mm2 = pixel_spacing_mm ** 2
     area_pixels = np.sum(mask)
-    return area_pixels * pixel_area_mm2 * slice_thickness_mm
+    return area_pixels * pixel_area_mm2 * 1.25  # Default slice thickness 1.25mm
 
-def calculate_nodule_diameter(area_pixels, pixel_spacing_mm=0.7):
-    """Calculate approximate diameter in mm"""
+def calculate_diameter(area_pixels, pixel_spacing_mm=0.7):
     area_mm2 = area_pixels * (pixel_spacing_mm ** 2)
-    diameter_mm = 2 * np.sqrt(area_mm2 / np.pi)
-    return diameter_mm
+    return 2 * np.sqrt(area_mm2 / np.pi)
 
 # ========== MAIN UI ==========
 def main():
-    st.title("🫁 Lung Nodule Segmentation Tool")
-    st.markdown("### Fully Automatic AI-Powered Detection & Segmentation")
-    st.markdown("**HIT500 Capstone | Biomedical Engineering | Nqobile Maware**")
+    st.title("🫁 Lung Nodule Segmentation")
+    st.markdown("### Upload CT Scan - AI Automatically Detects Nodules")
     st.markdown("---")
     
     # Login
@@ -279,7 +254,7 @@ def main():
     if not st.session_state.logged_in:
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
-            st.subheader("🔐 Radiologist Login")
+            st.subheader("🔐 Login")
             username = st.text_input("Username")
             password = st.text_input("Password", type="password")
             
@@ -288,10 +263,10 @@ def main():
                     st.session_state.logged_in = True
                     st.rerun()
                 else:
-                    st.error("Invalid credentials. Use: radiologist / hit500")
+                    st.error("Invalid credentials")
         return
     
-    st.sidebar.success("✅ Logged in as: Radiologist")
+    # Logout button in sidebar
     if st.sidebar.button("Logout"):
         st.session_state.logged_in = False
         st.session_state.clear()
@@ -302,121 +277,85 @@ def main():
     if not model_loaded:
         st.stop()
     
-    # File upload
-    st.subheader("📤 Upload CT Scan")
-    
+    # File upload - simple and clean
     uploaded_files = st.file_uploader(
-        "Select both .mhd and .raw files (Ctrl+Click or Shift+Click to select multiple)",
+        "Select .mhd and .raw files (select both at once)",
         type=["mhd", "raw"],
         accept_multiple_files=True
     )
     
     if uploaded_files and len(uploaded_files) == 2:
+        # Load CT scan
         with st.spinner("Loading CT scan..."):
-            ct_array, spacing, origin = load_mhd_files_from_uploads(uploaded_files)
+            ct_array, spacing, _ = load_mhd_files(uploaded_files)
+        
+        if ct_array is not None:
+            st.success(f"✅ CT scan loaded: {ct_array.shape[0]} slices")
             
-            if ct_array is not None:
-                st.success(f"✅ CT scan loaded! {ct_array.shape[0]} slices")
+            # Normalize
+            window_min, window_max = -1000.0, 400.0
+            ct_normalized = np.clip(ct_array, window_min, window_max)
+            ct_normalized = (ct_normalized - window_min) / (window_max - window_min)
+            
+            # Show preview
+            middle = ct_array.shape[0] // 2
+            st.image(ct_normalized[middle], caption=f"Preview Slice {middle}", use_container_width=True)
+            
+            # Auto-detect button
+            if st.button("🔍 DETECT NODULES", type="primary", use_container_width=True):
+                detections = detect_nodules(model, ct_normalized)
                 
-                # Normalize
-                window_min, window_max = -1000.0, 400.0
-                ct_normalized = np.clip(ct_array, window_min, window_max)
-                ct_normalized = (ct_normalized - window_min) / (window_max - window_min)
-                
-                st.session_state['ct_volume'] = ct_normalized
-                st.session_state['ct_loaded'] = True
-                
-                # Preview
-                middle = ct_array.shape[0] // 2
-                fig, ax = plt.subplots(figsize=(6, 6))
-                ax.imshow(ct_normalized[middle], cmap='gray')
-                ax.set_title(f"Preview - Slice {middle} of {ct_array.shape[0]}")
-                ax.axis('off')
-                st.pyplot(fig)
-    
-    # Automatic Detection
-    if st.session_state.get('ct_loaded', False):
-        st.markdown("---")
-        
-        # Settings
-        col1, col2 = st.columns(2)
-        with col1:
-            sensitivity = st.select_slider("Detection Sensitivity", ["Low", "Medium", "High"], value="Medium")
-        with col2:
-            pixel_spacing = st.number_input("Pixel Spacing (mm)", value=0.7, step=0.05, help="From CT metadata")
-        
-        min_area_map = {"Low": 80, "Medium": 50, "High": 30}
-        min_area = min_area_map[sensitivity]
-        
-        if st.button("🔍 RUN AUTOMATIC DETECTION", type="primary", use_container_width=True):
-            detections = auto_detect_and_segment_nodules(model, st.session_state['ct_volume'], min_area)
-            st.session_state['detections'] = detections
-            
-            if detections:
-                st.balloons()
-                st.success(f"✅ Found {len(detections)} nodule(s)!")
-            else:
-                st.info("No nodules detected in this scan")
-        
-        # Display results
-        if 'detections' in st.session_state and st.session_state['detections']:
-            detections = st.session_state['detections']
-            
-            st.subheader(f"📊 Results: {len(detections)} Nodule(s) Found")
-            
-            for idx, d in enumerate(detections):
-                with st.expander(f"Nodule #{idx+1} - Slice {d['slice']} (Confidence: {d['confidence']:.0%})", expanded=(idx==0)):
-                    volume = calculate_volume(d['mask'], pixel_spacing)
-                    diameter = calculate_nodule_diameter(d['area_pixels'], pixel_spacing)
+                if detections:
+                    st.success(f"✅ Found {len(detections)} nodule(s)")
                     
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        # Create overlay
-                        slice_norm = (d['slice_image'] - d['slice_image'].min()) / (d['slice_image'].max() - d['slice_image'].min() + 1e-8)
-                        overlay = np.stack([slice_norm] * 3, axis=-1)
-                        overlay[:, :, 0] = np.where(d['mask'] > 0.5, 1.0, overlay[:, :, 0])
-                        overlay[:, :, 1] = np.where(d['mask'] > 0.5, 0.0, overlay[:, :, 1])
-                        overlay[:, :, 2] = np.where(d['mask'] > 0.5, 0.0, overlay[:, :, 2])
+                    # Show results
+                    for idx, d in enumerate(detections):
+                        volume = calculate_volume(d['mask'])
+                        diameter = calculate_diameter(d['area_pixels'])
                         
-                        st.image(overlay, caption=f"Slice {d['slice']}", use_container_width=True)
+                        with st.container():
+                            st.markdown(f"### Nodule {idx+1} - Slice {d['slice']}")
+                            
+                            col1, col2 = st.columns([2, 1])
+                            
+                            with col1:
+                                # Create overlay
+                                slice_norm = (d['slice_image'] - d['slice_image'].min()) / (d['slice_image'].max() - d['slice_image'].min() + 1e-8)
+                                overlay = np.stack([slice_norm] * 3, axis=-1)
+                                overlay[:, :, 0] = np.where(d['mask'] > 0.5, 1.0, overlay[:, :, 0])
+                                overlay[:, :, 1] = np.where(d['mask'] > 0.5, 0.0, overlay[:, :, 1])
+                                overlay[:, :, 2] = np.where(d['mask'] > 0.5, 0.0, overlay[:, :, 2])
+                                
+                                st.image(overlay, use_container_width=True)
+                            
+                            with col2:
+                                st.metric("Volume", f"{volume:.1f} mm³")
+                                st.metric("Diameter", f"{diameter:.1f} mm")
+                                st.metric("Confidence", f"{d['confidence']:.0%}")
+                                
+                                # Clinical recommendation
+                                if volume < 100:
+                                    st.info("📌 Small - Monitor")
+                                elif volume < 300:
+                                    st.warning("⚠️ Medium - Follow up")
+                                else:
+                                    st.error("🚨 Large - Urgent")
+                            
+                            st.markdown("---")
                     
-                    with col2:
-                        st.metric("📏 Volume", f"{volume:.1f} mm³")
-                        st.metric("📐 Diameter", f"{diameter:.1f} mm")
-                        st.metric("📊 Area", f"{d['area_pixels']:.0f} px²")
-                        st.metric("🎯 Confidence", f"{d['confidence']:.0%}")
-                        
-                        # Clinical recommendation
-                        if volume < 100:
-                            st.info("📌 Small nodule - Regular monitoring")
-                        elif volume < 300:
-                            st.warning("⚠️ Medium nodule - Further evaluation")
-                        else:
-                            st.error("🚨 Large nodule - Urgent consultation")
-                    
-                    # Download button
-                    buf = io.BytesIO()
-                    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
-                    ax1.imshow(d['slice_image'], cmap='gray')
-                    ax1.set_title(f"Original - Slice {d['slice']}")
-                    ax1.axis('off')
-                    ax2.imshow(d['mask'], cmap='gray')
-                    ax2.set_title("Segmentation Mask")
-                    ax2.axis('off')
-                    plt.tight_layout()
-                    plt.savefig(buf, format='png', bbox_inches='tight', dpi=150)
-                    buf.seek(0)
-                    
+                    # Download all results
                     st.download_button(
-                        f"📥 Download Report",
-                        buf,
-                        f"nodule_{idx+1}_slice_{d['slice']}.png",
-                        mime="image/png"
+                        "📊 Download Full Report",
+                        f"Nodules Found: {len(detections)}\n\n" + 
+                        "\n".join([f"Nodule {i+1}: Slice {d['slice']}, Volume: {calculate_volume(d['mask']):.1f}mm³, Confidence: {d['confidence']:.0%}" 
+                                  for i, d in enumerate(detections)]),
+                        "nodule_report.txt"
                     )
+                else:
+                    st.info("No nodules detected")
     
     st.markdown("---")
-    st.caption("© 2026 HIT500 Capstone Project | Model: Memory Efficient U-Net (3.4M params)")
+    st.caption("© HIT500 Capstone Project")
 
 if __name__ == "__main__":
     main()
