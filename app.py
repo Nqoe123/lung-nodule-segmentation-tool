@@ -12,7 +12,7 @@ from skimage.transform import resize
 
 # ========== GOOGLE DRIVE SETUP ==========
 GOOGLE_DRIVE_FILE_ID = "1FdIozNEVbIPUsjcdReAfmbgN3Nisx9yQ"  # Replace with your actual FILE ID
-MODEL_FILENAME = "best_unet_model_fixed.pth"
+MODEL_FILENAME = "best_unet_model.pth"
 
 def download_model_from_drive():
     if not os.path.exists(MODEL_FILENAME):
@@ -25,9 +25,7 @@ def download_model_from_drive():
 # ========== PAGE CONFIG ==========
 st.set_page_config(page_title="Lung Nodule Segmentation", page_icon="🫁", layout="wide")
 
-# ========== MEMORY EFFICIENT U-NET MODEL (3.4M parameters) ==========
-# This matches the exact architecture used in training (32→64→128→256→256 channels)
-
+# ========== MEMORY EFFICIENT U-NET (EXACT ARCHITECTURE FROM TRAINING) ==========
 class DoubleConv(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
@@ -78,66 +76,95 @@ class OutConv(nn.Module):
         return self.conv(x)
 
 class UNet(nn.Module):
-    """Memory Efficient U-Net - 3.4M parameters (reduced from 31M)"""
+    """Memory Efficient U-Net - EXACT architecture from training code"""
     def __init__(self, n_channels=1, n_classes=1, bilinear=True):
         super().__init__()
         self.n_channels = n_channels
         self.n_classes = n_classes
         self.bilinear = bilinear
         
-        # Memory efficient - reduced channels (32→64→128→256→256)
-        self.inc = DoubleConv(n_channels, 32)      # 32 channels
-        self.down1 = Down(32, 64)                  # 64 channels
-        self.down2 = Down(64, 128)                 # 128 channels
-        self.down3 = Down(128, 256)                # 256 channels
+        # Memory efficient - reduced channels (EXACT from training)
+        self.inc = DoubleConv(n_channels, 32)
+        self.down1 = Down(32, 64)
+        self.down2 = Down(64, 128)
+        self.down3 = Down(128, 256)
         factor = 2 if bilinear else 1
-        self.down4 = Down(256, 512 // factor)      # 256 channels (with bilinear)
+        self.down4 = Down(256, 512 // factor)
         
-        # Decoder path
-        self.up1 = Up(512, 256 // factor, bilinear)   # 256 channels
-        self.up2 = Up(256, 128 // factor, bilinear)   # 128 channels
-        self.up3 = Up(128, 64 // factor, bilinear)    # 64 channels
-        self.up4 = Up(64, 32, bilinear)               # 32 channels
-        self.outc = OutConv(32, n_classes)            # 1 channel output
+        self.up1 = Up(512, 256 // factor, bilinear)
+        self.up2 = Up(256, 128 // factor, bilinear)
+        self.up3 = Up(128, 64 // factor, bilinear)
+        self.up4 = Up(64, 32, bilinear)
+        self.outc = OutConv(32, n_classes)
     
     def forward(self, x):
-        x1 = self.inc(x)      # 32 channels
-        x2 = self.down1(x1)   # 64 channels
-        x3 = self.down2(x2)   # 128 channels
-        x4 = self.down3(x3)   # 256 channels
-        x5 = self.down4(x4)   # 256 channels
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
+        x5 = self.down4(x4)
         
         x = self.up1(x5, x4)
         x = self.up2(x, x3)
         x = self.up3(x, x2)
         x = self.up4(x, x1)
         logits = self.outc(x)
-        return torch.sigmoid(logits)  # Output probabilities (0-1)
+        return logits  # Return logits, not sigmoid (BCEWithLogitsLoss expects logits)
 
 # ========== LOAD MODEL ==========
 @st.cache_resource
 def load_model():
     model_path = download_model_from_drive()
     model = UNet()
+    
     try:
-        # Load with appropriate map location
-        state_dict = torch.load(model_path, map_location='cpu')
+        # Load checkpoint
+        checkpoint = torch.load(model_path, map_location='cpu')
+        
+        # Extract state dict (handle different save formats)
+        if 'model_state_dict' in checkpoint:
+            state_dict = checkpoint['model_state_dict']
+            best_dice = checkpoint.get('best_dice', 'Unknown')
+        else:
+            state_dict = checkpoint
+            best_dice = 'Unknown'
         
         # Handle DataParallel wrapper if present
-        if 'module.' in list(state_dict.keys())[0]:
+        if state_dict and 'module.' in list(state_dict.keys())[0]:
             from collections import OrderedDict
             new_state_dict = OrderedDict()
             for k, v in state_dict.items():
-                name = k[7:]  # remove 'module.' prefix
+                name = k[7:]  # remove 'module.'
                 new_state_dict[name] = v
             state_dict = new_state_dict
         
+        # Load weights
         model.load_state_dict(state_dict)
         model.eval()
+        
+        # Calculate and display model info
+        total_params = sum(p.numel() for p in model.parameters())
+        st.sidebar.success(f"✅ Model loaded successfully!")
+        st.sidebar.info(f"📊 Model Stats:\n"
+                       f"• Parameters: {total_params/1e6:.1f}M\n"
+                       f"• Best Dice: {best_dice}\n"
+                       f"• Architecture: Memory Efficient U-Net")
+        
         return model, True
+        
     except Exception as e:
         st.error(f"Error loading model: {e}")
-        st.info("Make sure your model file is saved from the training script (UNet with 32 starting channels)")
+        st.info("""
+        **Troubleshooting:**
+        1. Make sure you uploaded the correct model file to Google Drive
+        2. Update the GOOGLE_DRIVE_FILE_ID with your actual file ID
+        3. The model should be saved from the training script as 'best_model.pth'
+        
+        **To get the FILE_ID:**
+        - Upload your model to Google Drive
+        - Right-click → "Get link"
+        - Copy the file ID from the URL (the long string between /d/ and /view)
+        """)
         return model, False
 
 # ========== HELPER FUNCTIONS ==========
@@ -154,23 +181,23 @@ def segment_nodule(model, image_array):
     if len(image_array.shape) == 3:
         image_array = image_array[:, :, 0]
     
-    # Resize to 512x512 (training size)
-    img_resized = resize(image_array, (512, 512))
+    # Resize to 512x512 (exactly as in training)
+    img_resized = resize(image_array, (512, 512), preserve_range=True)
     
-    # Normalize same as training (window -1000 to 400)
+    # Normalize using same method as training (window -1000 to 400)
     window_min, window_max = -1000.0, 400.0
-    img_normalized = np.clip(img_resized * (window_max - window_min) + window_min, window_min, window_max)
+    img_normalized = np.clip(img_resized, window_min, window_max)
     img_normalized = (img_normalized - window_min) / (window_max - window_min)
     
-    # Convert to tensor
+    # Convert to tensor (exactly as in training)
     input_tensor = torch.FloatTensor(img_normalized).unsqueeze(0).unsqueeze(0)
     
     # Segment
     model.eval()
     with torch.no_grad():
-        output = model(input_tensor)
-        mask = output.squeeze().numpy()
-        mask = (mask > 0.5).astype(np.float32)
+        outputs = model(input_tensor)  # Get logits
+        probs = torch.sigmoid(outputs)  # Convert to probabilities
+        mask = (probs > 0.5).float().squeeze().numpy()
     
     # Resize back to original dimensions
     return resize(mask, image_array.shape[:2], order=0, preserve_range=True)
@@ -183,7 +210,7 @@ def calculate_volume(mask, pixel_spacing_mm=0.7, slice_thickness_mm=1.25):
 
 # ========== MAIN UI ==========
 st.title("🫁 Lung Nodule Segmentation Tool")
-st.markdown("### CNN-Based Automated Segmentation for CT Scans")
+st.markdown("### Memory Efficient CNN-Based Segmentation for CT Scans")
 st.markdown("**HIT500 Capstone | Biomedical Engineering | Nqobile Maware**")
 st.markdown("---")
 
@@ -210,21 +237,31 @@ else:
         st.session_state.logged_in = False
         st.rerun()
     
-    # Model info in sidebar
+    # Model architecture details in sidebar
     st.sidebar.markdown("---")
-    st.sidebar.markdown("**Model Architecture**")
-    st.sidebar.markdown("- Memory Efficient U-Net")
-    st.sidebar.markdown("- 3.4M parameters")
-    st.sidebar.markdown("- Input: 512×512 CT slice")
-    st.sidebar.markdown("- Training Dice: 0.6399")
+    st.sidebar.markdown("**🧠 Model Architecture**")
+    st.sidebar.markdown("```
+Encoder:
+  Input: 1×512×512
+  ↓ 32 channels
+  ↓ 64 channels  
+  ↓ 128 channels
+  ↓ 256 channels
+  ↓ 256 channels
+
+Decoder:
+  ↑ 256 channels
+  ↑ 128 channels
+  ↑ 64 channels
+  ↑ 32 channels
+  Output: 1×512×512
+```")
     
     # Load model
     model, model_loaded = load_model()
     
-    if model_loaded:
-        st.sidebar.success("✅ Model loaded from Google Drive")
-    else:
-        st.sidebar.error("❌ Model failed to load")
+    if not model_loaded:
+        st.stop()
     
     col_left, col_right = st.columns(2)
     
@@ -240,7 +277,7 @@ else:
             st.image(original_array, caption="Original CT Image", use_container_width=True)
             
             if st.button("🔍 Segment Nodule", type="primary"):
-                with st.spinner("Segmenting..."):
+                with st.spinner("Segmenting with AI model..."):
                     mask = segment_nodule(model, original_array)
                     volume = calculate_volume(mask)
                     st.session_state['mask'] = mask
@@ -252,22 +289,23 @@ else:
         st.subheader("📊 Results")
         
         if 'mask' in st.session_state:
-            tab1, tab2, tab3 = st.tabs(["Mask", "Overlay", "Metrics"])
+            tab1, tab2, tab3 = st.tabs(["🎭 Binary Mask", "🔴 Overlay", "📈 Clinical Metrics"])
             
             with tab1:
                 fig, ax = plt.subplots(figsize=(5, 5))
                 ax.imshow(st.session_state['mask'], cmap='gray')
-                ax.set_title("White = Nodule, Black = Background")
+                ax.set_title("White = Nodule Detected, Black = Background")
                 ax.axis('off')
                 st.pyplot(fig)
                 
+                # Download button for mask
                 buf = io.BytesIO()
                 plt.figure(figsize=(5,5))
                 plt.imshow(st.session_state['mask'], cmap='gray')
                 plt.axis('off')
-                plt.savefig(buf, format='png', bbox_inches='tight')
+                plt.savefig(buf, format='png', bbox_inches='tight', dpi=150)
                 buf.seek(0)
-                st.download_button("📥 Download Mask", buf, "nodule_mask.png", mime="image/png")
+                st.download_button("📥 Download Segmentation Mask", buf, "nodule_mask.png", mime="image/png")
             
             with tab2:
                 original = st.session_state['original']
@@ -290,38 +328,67 @@ else:
                 area_pct = (nodule_pixels / total_pixels) * 100
                 
                 cola, colb, colc = st.columns(3)
-                cola.metric("📏 Volume", f"{st.session_state['volume']:.2f} mm³")
-                colb.metric("📐 Area", f"{area_pct:.2f}%")
-                colc.metric("🎯 Dice Score (Training)", "0.64")
+                cola.metric("📏 Estimated Volume", f"{st.session_state['volume']:.2f} mm³")
+                colb.metric("📐 Relative Area", f"{area_pct:.2f}%")
+                colc.metric("🎯 Model Status", "Active")
                 
                 st.markdown("---")
-                st.markdown("**Clinical Recommendation**")
+                st.markdown("**🏥 Clinical Recommendation**")
                 
                 if area_pct < 1:
-                    st.info("📌 **Small nodule (<1% of image)** - Regular monitoring recommended. Follow-up in 6-12 months.")
+                    st.info("📌 **Small nodule (<1% of image)**\n\n"
+                           "• Regular monitoring recommended\n"
+                           "• Follow-up CT in 6-12 months\n"
+                           "• Low risk profile")
                 elif area_pct < 5:
-                    st.warning("⚠️ **Medium nodule (1-5% of image)** - Further evaluation suggested. Consider short-term follow-up (3-6 months).")
+                    st.warning("⚠️ **Medium nodule (1-5% of image)**\n\n"
+                              "• Further evaluation suggested\n"
+                              "• Short-term follow-up (3-6 months)\n"
+                              "• Consider additional imaging")
                 else:
-                    st.error("🚨 **Large nodule (>5% of image)** - Urgent consultation recommended. Consider biopsy or surgical referral.")
+                    st.error("🚨 **Large nodule (>5% of image)**\n\n"
+                            "• Urgent consultation recommended\n"
+                            "• Consider biopsy or surgical referral\n"
+                            "• High priority follow-up needed")
     
     st.markdown("---")
-    st.caption("© 2026 HIT500 Capstone Project | Model: Memory Efficient U-Net (3.4M params) | Trained on LUNA16")
+    st.caption("© 2026 HIT500 Capstone Project | Model: Memory Efficient U-Net (3.4M params) | Trained on LUNA16 dataset")
 
-# ========== INSTRUCTIONS ==========
-with st.expander("ℹ️ How to use this app"):
+# ========== INSTRUCTIONS EXPANDER ==========
+with st.expander("ℹ️ How to use this application"):
     st.markdown("""
-    1. **Login** using credentials: `radiologist` / `hit500`
-    2. **Upload** a CT scan image (PNG, JPG, JPEG)
-    3. Click **"Segment Nodule"** to run the AI model
-    4. View results in three tabs:
-       - **Mask**: Binary segmentation mask
-       - **Overlay**: Nodule highlighted in red on original CT
-       - **Metrics**: Volume calculation and clinical recommendations
-    5. **Download** the mask for your records
+    ### Quick Start Guide
     
-    **Model Details:**
-    - Architecture: Memory Efficient U-Net (3.4M parameters)
-    - Training Data: LUNA16 dataset (902 CT slices, 601 scans)
-    - Performance: 0.64 Dice score on validation
-    - Input: 512×512 grayscale CT slices
+    1. **Login** using credentials: `radiologist` / `hit500`
+    2. **Upload** a CT scan image (supports PNG, JPG, JPEG)
+    3. Click **"Segment Nodule"** to run the AI model
+    4. Review results in three tabs:
+       - **Binary Mask**: Pure segmentation mask
+       - **Overlay**: Nodule highlighted in red on original CT
+       - **Clinical Metrics**: Volume calculation and recommendations
+    5. **Download** the segmentation mask for your records
+    
+    ### Model Information
+    
+    - **Architecture**: Memory Efficient U-Net
+    - **Parameters**: 3.4 million (87% smaller than standard U-Net)
+    - **Training Data**: LUNA16 dataset (902 CT slices, 601 scans)
+    - **Input Size**: 512×512 grayscale
+    - **Performance**: 0.64 Dice score on validation set
+    
+    ### Technical Details
+    
+    The model uses:
+    - Encoder: 32 → 64 → 128 → 256 → 256 channels
+    - Decoder: 256 → 128 → 64 → 32 → 1 channel
+    - Bilinear upsampling for memory efficiency
+    - Batch normalization for stable training
+    
+    ### Clinical Use
+    
+    This tool is designed to assist radiologists in:
+    - Automated nodule detection
+    - Volume measurement for growth tracking
+    - Standardized reporting
+    - Clinical decision support
     """)
