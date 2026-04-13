@@ -12,6 +12,7 @@ from skimage.transform import resize
 import tempfile
 import zipfile
 import SimpleITK as sitk
+from collections import OrderedDict
 
 # ========== GOOGLE DRIVE SETUP ==========
 GOOGLE_DRIVE_FILE_ID = "1FdIozNEVbIPUsjcdReAfmbgN3Nisx9yQ"  # Replace with your actual FILE ID
@@ -131,7 +132,6 @@ def load_model():
             best_dice = 'Unknown'
         
         if state_dict and 'module.' in list(state_dict.keys())[0]:
-            from collections import OrderedDict
             new_state_dict = OrderedDict()
             for k, v in state_dict.items():
                 name = k[7:]
@@ -154,15 +154,12 @@ def load_model():
         st.error(f"Error loading model: {e}")
         return model, False
 
-# ========== MHD FILE LOADING WITH MULTI-UPLOAD ==========
+# ========== MHD FILE LOADING ==========
 def load_mhd_files_from_uploads(uploaded_files):
-    """
-    Load MHD and RAW files from multiple file uploads
-    """
+    """Load MHD and RAW files from multiple file uploads"""
     mhd_file = None
     raw_file = None
     
-    # Separate the files
     for uploaded_file in uploaded_files:
         if uploaded_file.name.endswith('.mhd'):
             mhd_file = uploaded_file
@@ -177,32 +174,21 @@ def load_mhd_files_from_uploads(uploaded_files):
         st.error("No .raw file found in uploaded files")
         return None, None, None
     
-    # Check if base names match
-    mhd_basename = os.path.splitext(mhd_file.name)[0]
-    raw_basename = os.path.splitext(raw_file.name)[0]
-    
-    if mhd_basename != raw_basename:
-        st.warning(f"⚠️ Base names don't match: '{mhd_basename}' vs '{raw_basename}'. They should be the same for proper loading.")
-    
     try:
-        # Create a temporary directory
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Save files with their original names in the same directory
             mhd_path = os.path.join(tmpdir, mhd_file.name)
             raw_path = os.path.join(tmpdir, raw_file.name)
             
-            # Write the files
             with open(mhd_path, 'wb') as f:
                 f.write(mhd_file.getvalue())
             
             with open(raw_path, 'wb') as f:
                 f.write(raw_file.getvalue())
             
-            # Update the MHD file to point to the correct raw file name
+            # Update MHD file to point to correct raw file
             with open(mhd_path, 'r') as f:
                 mhd_content = f.read()
             
-            # Look for ElementDataFile line and update it
             import re
             mhd_content = re.sub(
                 r'ElementDataFile\s*=\s*.*',
@@ -210,21 +196,15 @@ def load_mhd_files_from_uploads(uploaded_files):
                 mhd_content
             )
             
-            # Write back the updated MHD file
             with open(mhd_path, 'w') as f:
                 f.write(mhd_content)
             
-            # Now read with SimpleITK
             itk_image = sitk.ReadImage(mhd_path)
-            
-            # Get the array
             ct_array = sitk.GetArrayFromImage(itk_image)
             
-            # Get metadata
             spacing = itk_image.GetSpacing()
             origin = itk_image.GetOrigin()
             
-            # Reorder to (z, y, x) to match array
             spacing = (spacing[2], spacing[1], spacing[0])
             origin = (origin[2], origin[1], origin[0])
             
@@ -244,21 +224,63 @@ def process_ct_scan(ct_array):
 
 def segment_nodule_from_array(model, ct_slice):
     """Segment nodule from a CT slice array"""
-    # Resize to 512x512
     img_resized = resize(ct_slice, (512, 512), preserve_range=True)
-    
-    # Convert to tensor
     input_tensor = torch.FloatTensor(img_resized).unsqueeze(0).unsqueeze(0)
     
-    # Segment
     model.eval()
     with torch.no_grad():
         outputs = model(input_tensor)
         probs = torch.sigmoid(outputs)
         mask = (probs > 0.5).float().squeeze().numpy()
     
-    # Resize back to original dimensions
     return resize(mask, ct_slice.shape[:2], order=0, preserve_range=True)
+
+def auto_detect_nodules(model, ct_volume, min_area=50):
+    """
+    Automatically detect slices with potential nodules
+    Returns: list of (slice_index, nodule_area, confidence, mask)
+    """
+    detections = []
+    
+    with st.spinner("🔍 Scanning all slices for nodules..."):
+        progress_bar = st.progress(0)
+        
+        for i in range(ct_volume.shape[0]):
+            # Update progress every 10 slices
+            if i % 10 == 0:
+                progress_bar.progress(i / ct_volume.shape[0])
+            
+            slice_img = ct_volume[i]
+            
+            # Resize to 512x512 (model input size)
+            img_resized = resize(slice_img, (512, 512), preserve_range=True)
+            input_tensor = torch.FloatTensor(img_resized).unsqueeze(0).unsqueeze(0)
+            
+            with torch.no_grad():
+                output = model(input_tensor)
+                probs = torch.sigmoid(output)
+                mask = (probs > 0.5).float().squeeze().numpy()
+            
+            # Resize mask back to original dimensions
+            mask_original = resize(mask, slice_img.shape[:2], order=0, preserve_range=True)
+            nodule_area = np.sum(mask_original)
+            
+            if nodule_area > min_area:
+                # Calculate confidence based on area and mask consistency
+                confidence = min(0.95, nodule_area / 300)
+                detections.append({
+                    'slice': i,
+                    'area': nodule_area,
+                    'confidence': confidence,
+                    'mask': mask_original
+                })
+        
+        progress_bar.empty()
+    
+    # Sort by confidence (highest first)
+    detections.sort(key=lambda x: x['confidence'], reverse=True)
+    
+    return detections
 
 def calculate_volume(mask, pixel_spacing_mm=0.7, slice_thickness_mm=1.25):
     """Calculate nodule volume in mm³"""
@@ -268,7 +290,7 @@ def calculate_volume(mask, pixel_spacing_mm=0.7, slice_thickness_mm=1.25):
 
 # ========== MAIN UI ==========
 st.title("🫁 Lung Nodule Segmentation Tool")
-st.markdown("### Memory Efficient CNN-Based Segmentation for CT Scans")
+st.markdown("### AI-Powered Detection & Segmentation for CT Scans")
 st.markdown("**HIT500 Capstone | Biomedical Engineering | Nqobile Maware**")
 st.markdown("---")
 
@@ -350,34 +372,26 @@ else:
                     st.success("✅ Successfully loaded CT scan!")
                     st.info(f"📊 Scan dimensions: {ct_array.shape[0]} slices × {ct_array.shape[1]} × {ct_array.shape[2]}")
                     
-                    # Process and show preview
                     ct_normalized = process_ct_scan(ct_array)
-                    
-                    # Find best slice (with most variation)
-                    slice_std = [np.std(ct_normalized[i]) for i in range(min(ct_normalized.shape[0], 100))]
-                    best_slice = np.argmax(slice_std)
                     
                     st.session_state['ct_array'] = ct_normalized
                     st.session_state['ct_array_raw'] = ct_array
                     st.session_state['spacing'] = spacing
                     st.session_state['origin'] = origin
                     st.session_state['num_slices'] = ct_array.shape[0]
-                    st.session_state['best_slice'] = best_slice
                     
                     # Show preview
+                    middle_slice = ct_array.shape[0] // 2
                     st.subheader("📷 Preview Slice")
                     fig, ax = plt.subplots(figsize=(6, 6))
-                    ax.imshow(ct_normalized[best_slice], cmap='gray')
-                    ax.set_title(f"Slice {best_slice} of {ct_array.shape[0]} (Preview)")
+                    ax.imshow(ct_normalized[middle_slice], cmap='gray')
+                    ax.set_title(f"Middle Slice ({middle_slice} of {ct_array.shape[0]})")
                     ax.axis('off')
                     st.pyplot(fig)
                     
                     ct_data = ct_normalized
                 else:
-                    st.error("Failed to load MHD/RAW files. Make sure you selected both .mhd and .raw files.")
-        
-        elif uploaded_files and len(uploaded_files) < 2:
-            st.warning("Please select both .mhd and .raw files (you need to select 2 files)")
+                    st.error("Failed to load MHD/RAW files")
     
     elif upload_type == "ZIP Archive (MHD+RAW)":
         zip_file = st.file_uploader("Choose ZIP file containing .mhd and .raw", type=["zip"])
@@ -386,16 +400,13 @@ else:
             with st.spinner("Extracting and loading ZIP archive..."):
                 try:
                     with tempfile.TemporaryDirectory() as tmpdir:
-                        # Save zip file
                         zip_path = os.path.join(tmpdir, "upload.zip")
                         with open(zip_path, 'wb') as f:
                             f.write(zip_file.getvalue())
                         
-                        # Extract zip
                         with zipfile.ZipFile(zip_path, 'r') as zf:
                             zf.extractall(tmpdir)
                         
-                        # Find .mhd and .raw files
                         mhd_path = None
                         raw_path = None
                         
@@ -406,15 +417,12 @@ else:
                                 raw_path = os.path.join(tmpdir, file)
                         
                         if mhd_path and raw_path:
-                            # Read the MHD file with SimpleITK
                             itk_image = sitk.ReadImage(mhd_path)
                             ct_array = sitk.GetArrayFromImage(itk_image)
                             
-                            # Get metadata
                             spacing = itk_image.GetSpacing()
                             origin = itk_image.GetOrigin()
                             
-                            # Reorder to (z, y, x)
                             spacing = (spacing[2], spacing[1], spacing[0])
                             origin = (origin[2], origin[1], origin[0])
                             
@@ -423,20 +431,17 @@ else:
                             
                             ct_normalized = process_ct_scan(ct_array)
                             
-                            slice_std = [np.std(ct_normalized[i]) for i in range(min(ct_normalized.shape[0], 100))]
-                            best_slice = np.argmax(slice_std)
-                            
                             st.session_state['ct_array'] = ct_normalized
                             st.session_state['ct_array_raw'] = ct_array
                             st.session_state['spacing'] = spacing
                             st.session_state['origin'] = origin
                             st.session_state['num_slices'] = ct_array.shape[0]
-                            st.session_state['best_slice'] = best_slice
                             
+                            middle_slice = ct_array.shape[0] // 2
                             st.subheader("📷 Preview Slice")
                             fig, ax = plt.subplots(figsize=(6, 6))
-                            ax.imshow(ct_normalized[best_slice], cmap='gray')
-                            ax.set_title(f"Slice {best_slice} of {ct_array.shape[0]}")
+                            ax.imshow(ct_normalized[middle_slice], cmap='gray')
+                            ax.set_title(f"Middle Slice ({middle_slice} of {ct_array.shape[0]})")
                             ax.axis('off')
                             st.pyplot(fig)
                             
@@ -447,27 +452,92 @@ else:
                 except Exception as e:
                     st.error(f"Error loading ZIP file: {str(e)}")
     
-    # Segmentation section for 3D CT data
+    # Process 3D CT data
     if ct_data is not None and len(np.array(ct_data).shape) == 3:
-        # 3D CT data - add slice selector
         num_slices = st.session_state.get('num_slices', ct_data.shape[0])
-        default_slice = st.session_state.get('best_slice', num_slices // 2)
+        
+        # Auto-detection section
+        st.subheader("🤖 AI-Powered Detection")
+        
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            if st.button("🔍 AUTO-DETECT NODULES", type="primary", use_container_width=True):
+                detections = auto_detect_nodules(model, ct_data, min_area=50)
+                
+                if detections:
+                    st.session_state['detections'] = detections
+                    st.success(f"✅ Found {len(detections)} potential nodule(s)!")
+                else:
+                    st.info("No nodules detected in this scan")
+                    st.session_state['detections'] = []
+        
+        # Display detected nodules
+        if 'detections' in st.session_state and st.session_state['detections']:
+            st.markdown("---")
+            st.subheader("🎯 Detected Nodules")
+            
+            # Create columns for detected nodules
+            detections = st.session_state['detections']
+            num_detections = min(len(detections), 5)
+            
+            for idx in range(num_detections):
+                det = detections[idx]
+                
+                # Create expandable card for each nodule
+                with st.expander(f"Nodule {idx+1} - Slice {det['slice']} (Confidence: {det['confidence']:.0%})"):
+                    col_img, col_metrics = st.columns([2, 1])
+                    
+                    with col_img:
+                        # Show the slice with overlay
+                        slice_img = ct_data[det['slice']]
+                        mask = det['mask']
+                        
+                        # Create overlay
+                        slice_norm = (slice_img - slice_img.min()) / (slice_img.max() - slice_img.min() + 1e-8)
+                        overlay = np.stack([slice_norm] * 3, axis=-1)
+                        overlay[:, :, 0] = np.where(mask > 0.5, 1.0, overlay[:, :, 0])
+                        overlay[:, :, 1] = np.where(mask > 0.5, 0.0, overlay[:, :, 1])
+                        overlay[:, :, 2] = np.where(mask > 0.5, 0.0, overlay[:, :, 2])
+                        
+                        fig, ax = plt.subplots(figsize=(6, 4))
+                        ax.imshow(overlay)
+                        ax.set_title(f"Nodule at Slice {det['slice']}")
+                        ax.axis('off')
+                        st.pyplot(fig)
+                    
+                    with col_metrics:
+                        st.metric("Nodule Area", f"{det['area']:.0f} pixels²")
+                        st.metric("Confidence Score", f"{det['confidence']:.0%}")
+                        
+                        if st.button(f"🔍 Analyze This Nodule", key=f"analyze_{idx}"):
+                            st.session_state['selected_slice'] = det['slice']
+                            st.session_state['selected_mask'] = det['mask']
+                            st.rerun()
+        
+        # Manual slice selection
+        st.markdown("---")
+        st.subheader("🔬 Manual Slice Review")
+        
+        # Get current slice from session state or default
+        current_slice = st.session_state.get('selected_slice', num_slices // 2)
         
         slice_num = st.slider(
-            "Select slice to segment:",
+            "Browse through slices:",
             min_value=0,
             max_value=num_slices - 1,
-            value=min(default_slice, num_slices - 1)
+            value=current_slice
         )
         
         current_slice_img = ct_data[slice_num]
-        st.image(current_slice_img, caption=f"CT Slice {slice_num} of {num_slices}", use_container_width=True)
         
+        # Display current slice
         col_left, col_right = st.columns(2)
         
         with col_left:
-            if st.button("🔍 Segment Nodule", type="primary"):
-                with st.spinner("Segmenting with AI model..."):
+            st.image(current_slice_img, caption=f"CT Slice {slice_num} of {num_slices}", use_container_width=True)
+            
+            if st.button("🔍 Segment Current Slice", type="primary"):
+                with st.spinner("Segmenting..."):
                     mask = segment_nodule_from_array(model, current_slice_img)
                     volume = calculate_volume(mask)
                     st.session_state['mask'] = mask
@@ -477,7 +547,7 @@ else:
                 st.success("Segmentation complete!")
         
         with col_right:
-            st.subheader("📊 Results")
+            st.subheader("📊 Segmentation Results")
             
             if 'mask' in st.session_state:
                 tab1, tab2, tab3 = st.tabs(["🎭 Binary Mask", "🔴 Overlay", "📈 Clinical Metrics"])
@@ -537,7 +607,7 @@ else:
         
         with col_left:
             if st.button("🔍 Segment Nodule", type="primary"):
-                with st.spinner("Segmenting with AI model..."):
+                with st.spinner("Segmenting..."):
                     mask = segment_nodule_from_array(model, ct_data)
                     volume = calculate_volume(mask)
                     st.session_state['mask'] = mask
