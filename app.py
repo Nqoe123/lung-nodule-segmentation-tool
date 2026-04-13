@@ -11,7 +11,7 @@ import gdown
 from skimage.transform import resize
 
 # ========== GOOGLE DRIVE SETUP ==========
-GOOGLE_DRIVE_FILE_ID = "1FdIozNEVbIPUsjcdReAfmbgN3Nisx9yQ"  # Replace with your actual FILE ID
+GOOGLE_DRIVE_FILE_ID = "1L9qrtFk12EAOI_h2ru5BzVFAMmsvHJHV"  # Replace with your actual FILE ID
 MODEL_FILENAME = "best_unet_model.pth"
 
 def download_model_from_drive():
@@ -145,7 +145,7 @@ def load_model():
         # Calculate and display model info
         total_params = sum(p.numel() for p in model.parameters())
         st.sidebar.success(f"✅ Model loaded successfully!")
-        st.sidebar.info(f"📊 Model Stats:\n"
+        st.sidebar.info(f"Model Stats:\n"
                        f"• Parameters: {total_params/1e6:.1f}M\n"
                        f"• Best Dice: {best_dice}\n"
                        f"• Architecture: Memory Efficient U-Net")
@@ -240,22 +240,20 @@ else:
     # Model architecture details in sidebar
     st.sidebar.markdown("---")
     st.sidebar.markdown("**🧠 Model Architecture**")
-    st.sidebar.markdown("```
-Encoder:
-  Input: 1×512×512
-  ↓ 32 channels
-  ↓ 64 channels  
-  ↓ 128 channels
-  ↓ 256 channels
-  ↓ 256 channels
-
-Decoder:
-  ↑ 256 channels
-  ↑ 128 channels
-  ↑ 64 channels
-  ↑ 32 channels
-  Output: 1×512×512
-```")
+    st.sidebar.markdown("Encoder Path:")
+    st.sidebar.markdown("- Input: 1x512x512")
+    st.sidebar.markdown("- 32 channels (DoubleConv)")
+    st.sidebar.markdown("- 64 channels (Down + DoubleConv)")
+    st.sidebar.markdown("- 128 channels (Down + DoubleConv)")
+    st.sidebar.markdown("- 256 channels (Down + DoubleConv)")
+    st.sidebar.markdown("- 256 channels (Down + DoubleConv)")
+    st.sidebar.markdown("")
+    st.sidebar.markdown("Decoder Path:")
+    st.sidebar.markdown("- 256 channels (Up + DoubleConv)")
+    st.sidebar.markdown("- 128 channels (Up + DoubleConv)")
+    st.sidebar.markdown("- 64 channels (Up + DoubleConv)")
+    st.sidebar.markdown("- 32 channels (Up + DoubleConv)")
+    st.sidebar.markdown("- Output: 1x512x512 (logits)")
     
     # Load model
     model, model_loaded = load_model()
@@ -373,14 +371,14 @@ with st.expander("ℹ️ How to use this application"):
     - **Architecture**: Memory Efficient U-Net
     - **Parameters**: 3.4 million (87% smaller than standard U-Net)
     - **Training Data**: LUNA16 dataset (902 CT slices, 601 scans)
-    - **Input Size**: 512×512 grayscale
+    - **Input Size**: 512x512 grayscale
     - **Performance**: 0.64 Dice score on validation set
     
     ### Technical Details
     
     The model uses:
-    - Encoder: 32 → 64 → 128 → 256 → 256 channels
-    - Decoder: 256 → 128 → 64 → 32 → 1 channel
+    - Encoder: 32 -> 64 -> 128 -> 256 -> 256 channels
+    - Decoder: 256 -> 128 -> 64 -> 32 -> 1 channel
     - Bilinear upsampling for memory efficiency
     - Batch normalization for stable training
     
