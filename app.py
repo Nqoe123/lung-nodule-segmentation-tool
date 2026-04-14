@@ -3,7 +3,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from PIL import Image
 import matplotlib.pyplot as plt
 import io
 import os
@@ -11,7 +10,6 @@ import gdown
 from skimage.transform import resize
 from skimage.measure import label, regionprops
 import tempfile
-import zipfile
 import SimpleITK as sitk
 from collections import OrderedDict
 
@@ -140,8 +138,12 @@ def load_model():
         st.error(f"Error loading model: {str(e)}")
         return None, False
 
-# ========== MHD FILE LOADING ==========
+# ========== MHD FILE LOADING WITH REAL SCAN PARAMETERS ==========
 def load_mhd_files(uploaded_files):
+    """
+    Load MHD and RAW files and extract REAL scan parameters
+    Returns: ct_array, pixel_spacing_mm, slice_thickness_mm
+    """
     mhd_file = None
     raw_file = None
     
@@ -152,6 +154,7 @@ def load_mhd_files(uploaded_files):
             raw_file = uploaded_file
     
     if not mhd_file or not raw_file:
+        st.error("Please upload both .mhd and .raw files")
         return None, None, None
     
     try:
@@ -164,7 +167,7 @@ def load_mhd_files(uploaded_files):
             with open(raw_path, 'wb') as f:
                 f.write(raw_file.getvalue())
             
-            # Update MHD reference
+            # Update MHD reference to point to correct raw file
             with open(mhd_path, 'r') as f:
                 mhd_content = f.read()
             
@@ -178,22 +181,36 @@ def load_mhd_files(uploaded_files):
             with open(mhd_path, 'w') as f:
                 f.write(mhd_content)
             
+            # Read the image using SimpleITK
             itk_image = sitk.ReadImage(mhd_path)
             ct_array = sitk.GetArrayFromImage(itk_image)
             
+            # Extract REAL scan parameters from metadata
             spacing = itk_image.GetSpacing()
-            spacing = (spacing[2], spacing[1], spacing[0])
+            # spacing[0] = pixel spacing in X direction (mm)
+            # spacing[1] = pixel spacing in Y direction (mm)
+            # spacing[2] = slice thickness in Z direction (mm) - THIS IS CRITICAL FOR VOLUME
             
-            return ct_array, spacing, None
+            pixel_spacing_mm = spacing[0]  # Usually 0.6-0.8 mm
+            slice_thickness_mm = spacing[2]  # Usually 0.625-2.5 mm
+            
+            # Display scan parameters to user
+            st.info(f"📊 Scan Parameters:\n"
+                   f"• Pixel spacing: {pixel_spacing_mm:.3f} mm\n"
+                   f"• Slice thickness: {slice_thickness_mm:.3f} mm\n"
+                   f"• Dimensions: {ct_array.shape[0]} slices × {ct_array.shape[1]} × {ct_array.shape[2]}")
+            
+            return ct_array, pixel_spacing_mm, slice_thickness_mm
             
     except Exception as e:
         st.error(f"Error loading files: {str(e)}")
         return None, None, None
 
-# ========== NODULE DETECTION WITH MULTIPLE NODULES PER SLICE ==========
-def detect_nodules(model, ct_volume, min_area=20):
+# ========== NODULE DETECTION WITH CORRECT VOLUME CALCULATION ==========
+def detect_nodules(model, ct_volume, pixel_spacing_mm, slice_thickness_mm, min_area_pixels=20):
     """
     Detect multiple nodules per slice using connected component analysis
+    Calculates REAL volume using actual scan parameters
     """
     all_detections = []
     
@@ -206,7 +223,7 @@ def detect_nodules(model, ct_volume, min_area=20):
             
             slice_img = ct_volume[i]
             
-            # Process slice
+            # Process slice through model
             img_resized = resize(slice_img, (512, 512), preserve_range=True)
             input_tensor = torch.FloatTensor(img_resized).unsqueeze(0).unsqueeze(0)
             
@@ -222,48 +239,46 @@ def detect_nodules(model, ct_volume, min_area=20):
             labeled_mask = label(mask_original > 0.5)
             
             if labeled_mask.max() > 0:
-                # Get properties of each connected component
                 props = regionprops(labeled_mask)
                 
                 for region in props:
-                    nodule_area = region.area
+                    nodule_area_pixels = region.area
                     
-                    if nodule_area >= min_area:
+                    if nodule_area_pixels >= min_area_pixels:
+                        # Calculate REAL volume using actual scan parameters
+                        # Step 1: Area in mm² = pixels × (pixel_spacing)²
+                        nodule_area_mm2 = nodule_area_pixels * (pixel_spacing_mm ** 2)
+                        
+                        # Step 2: Volume in mm³ = area in mm² × slice thickness
+                        nodule_volume_mm3 = nodule_area_mm2 * slice_thickness_mm
+                        
+                        # Calculate diameter from area (assuming circular)
+                        nodule_diameter_mm = 2 * np.sqrt(nodule_area_mm2 / np.pi)
+                        
+                        # Calculate confidence based on size and shape
+                        confidence = min(0.95, nodule_area_pixels / 300)
+                        
                         # Create individual mask for this nodule
                         individual_mask = (labeled_mask == region.label).astype(np.float32)
                         
-                        # Calculate confidence based on area
-                        confidence = min(0.95, nodule_area / 300)
-                        
-                        # Get bounding box for cropping
-                        minr, minc, maxr, maxc = region.bbox
-                        
                         all_detections.append({
                             'slice': i,
-                            'area_pixels': nodule_area,
+                            'area_pixels': nodule_area_pixels,
+                            'area_mm2': nodule_area_mm2,
+                            'volume_mm3': nodule_volume_mm3,
+                            'diameter_mm': nodule_diameter_mm,
                             'confidence': confidence,
                             'mask': individual_mask,
                             'slice_image': slice_img,
-                            'bbox': (minr, minc, maxr, maxc),
+                            'bbox': region.bbox,
                             'centroid': region.centroid
                         })
         
         progress_bar.empty()
     
-    # Sort by confidence
-    all_detections.sort(key=lambda x: x['confidence'], reverse=True)
+    # Sort by volume (largest first)
+    all_detections.sort(key=lambda x: x['volume_mm3'], reverse=True)
     return all_detections
-
-def calculate_volume(mask, pixel_spacing_mm=0.7):
-    """Calculate nodule volume in mm³"""
-    pixel_area_mm2 = pixel_spacing_mm ** 2
-    area_pixels = np.sum(mask)
-    return area_pixels * pixel_area_mm2 * 1.25  # Default slice thickness 1.25mm
-
-def calculate_diameter(area_pixels, pixel_spacing_mm=0.7):
-    """Calculate approximate diameter in mm"""
-    area_mm2 = area_pixels * (pixel_spacing_mm ** 2)
-    return 2 * np.sqrt(area_mm2 / np.pi)
 
 # ========== MAIN UI ==========
 def main():
@@ -291,6 +306,7 @@ def main():
         return
     
     # Logout button in sidebar
+    st.sidebar.success("✅ Logged in as: Radiologist")
     if st.sidebar.button("Logout"):
         st.session_state.logged_in = False
         st.session_state.clear()
@@ -301,33 +317,38 @@ def main():
     if not model_loaded:
         st.stop()
     
+    st.sidebar.success("✅ Model ready")
+    
     # File upload
+    st.subheader("📤 Upload CT Scan")
+    
     uploaded_files = st.file_uploader(
-        "Select .mhd and .raw files (select both at once)",
+        "Select .mhd and .raw files (select both at once using Ctrl+Click or Cmd+Click)",
         type=["mhd", "raw"],
         accept_multiple_files=True
     )
     
     if uploaded_files and len(uploaded_files) == 2:
-        # Load CT scan
+        # Load CT scan with REAL scan parameters
         with st.spinner("Loading CT scan..."):
-            ct_array, spacing, _ = load_mhd_files(uploaded_files)
+            ct_array, pixel_spacing_mm, slice_thickness_mm = load_mhd_files(uploaded_files)
         
         if ct_array is not None:
             st.success(f"✅ CT scan loaded: {ct_array.shape[0]} slices")
             
-            # Normalize
+            # Normalize CT values (window -1000 to 400 HU)
             window_min, window_max = -1000.0, 400.0
             ct_normalized = np.clip(ct_array, window_min, window_max)
             ct_normalized = (ct_normalized - window_min) / (window_max - window_min)
             
-            # Show preview
+            # Show preview of middle slice
             middle = ct_array.shape[0] // 2
-            st.image(ct_normalized[middle], caption=f"Preview Slice {middle}", use_container_width=True)
+            st.subheader("📷 Scan Preview")
+            st.image(ct_normalized[middle], caption=f"Middle Slice {middle} of {ct_array.shape[0]}", use_container_width=True)
             
             # Auto-detect button
             if st.button("🔍 DETECT NODULES", type="primary", use_container_width=True):
-                detections = detect_nodules(model, ct_normalized)
+                detections = detect_nodules(model, ct_normalized, pixel_spacing_mm, slice_thickness_mm)
                 
                 if detections:
                     st.success(f"✅ Found {len(detections)} nodule(s)")
@@ -342,19 +363,17 @@ def main():
                     for slice_num in sorted(detections_by_slice.keys()):
                         slice_detections = detections_by_slice[slice_num]
                         
-                        st.markdown(f"### Slice {slice_num} - {len(slice_detections)} Nodule(s)")
+                        st.markdown(f"### 📍 Slice {slice_num} - {len(slice_detections)} Nodule(s)")
                         
-                        # Create a grid for multiple nodules on same slice
+                        # Create layout based on number of nodules
                         if len(slice_detections) == 1:
                             # Single nodule - full width
                             d = slice_detections[0]
-                            volume = calculate_volume(d['mask'])
-                            diameter = calculate_diameter(d['area_pixels'])
                             
                             col1, col2 = st.columns([2, 1])
                             
                             with col1:
-                                # Create overlay with bounding box
+                                # Create overlay image
                                 slice_norm = (d['slice_image'] - d['slice_image'].min()) / (d['slice_image'].max() - d['slice_image'].min() + 1e-8)
                                 overlay = np.stack([slice_norm] * 3, axis=-1)
                                 overlay[:, :, 0] = np.where(d['mask'] > 0.5, 1.0, overlay[:, :, 0])
@@ -364,27 +383,26 @@ def main():
                                 st.image(overlay, use_container_width=True)
                             
                             with col2:
-                                st.metric("Volume", f"{volume:.1f} mm³")
-                                st.metric("Diameter", f"{diameter:.1f} mm")
-                                st.metric("Confidence", f"{d['confidence']:.0%}")
+                                st.metric("📏 Volume", f"{d['volume_mm3']:.1f} mm³")
+                                st.metric("📐 Diameter", f"{d['diameter_mm']:.1f} mm")
+                                st.metric("📊 Area", f"{d['area_mm2']:.1f} mm²")
+                                st.metric("🎯 Confidence", f"{d['confidence']:.0%}")
                                 
-                                if volume < 100:
-                                    st.info("📌 Small - Monitor")
-                                elif volume < 300:
-                                    st.warning("⚠️ Medium - Follow up")
+                                # Clinical recommendation based on volume
+                                if d['volume_mm3'] < 100:
+                                    st.info("📌 **Small nodule** - Regular monitoring recommended")
+                                elif d['volume_mm3'] < 300:
+                                    st.warning("⚠️ **Medium nodule** - Further evaluation suggested")
                                 else:
-                                    st.error("🚨 Large - Urgent")
+                                    st.error("🚨 **Large nodule** - Urgent consultation recommended")
                         
                         else:
-                            # Multiple nodules - create columns
+                            # Multiple nodules - side by side columns
                             cols = st.columns(len(slice_detections))
                             
                             for idx, (col, d) in enumerate(zip(cols, slice_detections)):
-                                volume = calculate_volume(d['mask'])
-                                diameter = calculate_diameter(d['area_pixels'])
-                                
                                 with col:
-                                    # Create overlay
+                                    # Create overlay for each nodule
                                     slice_norm = (d['slice_image'] - d['slice_image'].min()) / (d['slice_image'].max() - d['slice_image'].min() + 1e-8)
                                     overlay = np.stack([slice_norm] * 3, axis=-1)
                                     overlay[:, :, 0] = np.where(d['mask'] > 0.5, 1.0, overlay[:, :, 0])
@@ -393,29 +411,59 @@ def main():
                                     
                                     st.image(overlay, use_container_width=True)
                                     st.caption(f"Nodule {idx+1}")
-                                    st.metric("Volume", f"{volume:.1f} mm³")
-                                    st.metric("Diameter", f"{diameter:.1f} mm")
+                                    st.metric("Volume", f"{d['volume_mm3']:.1f} mm³")
+                                    st.metric("Diameter", f"{d['diameter_mm']:.1f} mm")
                                     st.metric("Confidence", f"{d['confidence']:.0%}")
                         
                         st.markdown("---")
                     
-                    # Download all results
-                    report_lines = [f"Nodules Found: {len(detections)}", ""]
+                    # Download full report
+                    report_lines = [
+                        "=" * 50,
+                        "LUNG NODULE DETECTION REPORT",
+                        "=" * 50,
+                        f"Total Nodules Found: {len(detections)}",
+                        f"Scan Parameters: Pixel Spacing = {pixel_spacing_mm:.3f} mm, Slice Thickness = {slice_thickness_mm:.3f} mm",
+                        "",
+                        "=" * 50,
+                        "INDIVIDUAL NODULE DETAILS",
+                        "=" * 50,
+                        ""
+                    ]
+                    
                     for i, d in enumerate(detections):
-                        volume = calculate_volume(d['mask'])
-                        diameter = calculate_diameter(d['area_pixels'])
-                        report_lines.append(f"Nodule {i+1}: Slice {d['slice']}, Volume: {volume:.1f}mm³, Diameter: {diameter:.1f}mm, Confidence: {d['confidence']:.0%}")
+                        report_lines.append(f"Nodule #{i+1}:")
+                        report_lines.append(f"  • Slice: {d['slice']}")
+                        report_lines.append(f"  • Volume: {d['volume_mm3']:.1f} mm³")
+                        report_lines.append(f"  • Diameter: {d['diameter_mm']:.1f} mm")
+                        report_lines.append(f"  • Area: {d['area_mm2']:.1f} mm²")
+                        report_lines.append(f"  • Confidence: {d['confidence']:.0%}")
+                        
+                        if d['volume_mm3'] < 100:
+                            report_lines.append(f"  • Recommendation: Small - Regular monitoring")
+                        elif d['volume_mm3'] < 300:
+                            report_lines.append(f"  • Recommendation: Medium - Further evaluation")
+                        else:
+                            report_lines.append(f"  • Recommendation: Large - Urgent consultation")
+                        report_lines.append("")
+                    
+                    report_lines.append("=" * 50)
+                    report_lines.append("End of Report")
                     
                     st.download_button(
-                        "📊 Download Full Report",
+                        "📊 Download Full Report (TXT)",
                         "\n".join(report_lines),
-                        "nodule_report.txt"
+                        "nodule_detection_report.txt",
+                        mime="text/plain"
                     )
                 else:
-                    st.info("No nodules detected")
+                    st.info("📌 No nodules detected in this scan")
+    
+    elif uploaded_files and len(uploaded_files) != 2:
+        st.warning("Please select exactly 2 files: one .mhd and one .raw file")
     
     st.markdown("---")
-    st.caption("© HIT500 Capstone Project")
+    st.caption("© HIT500 Capstone Project | Volume calculated using actual scan parameters from MHD metadata")
 
 if __name__ == "__main__":
     main()
