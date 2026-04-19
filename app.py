@@ -17,7 +17,7 @@ from collections import OrderedDict
 st.set_page_config(page_title="Lung Nodule Segmentation", page_icon="🫁", layout="wide")
 
 # ========== GOOGLE DRIVE SETUP ==========
-GOOGLE_DRIVE_FILE_ID = "1FdIozNEVbIPUsjcdReAfmbgN3Nisx9yQ"
+GOOGLE_DRIVE_FILE_ID = "1m0AE-Co5NTloIKV56-M-zF4IOoMReeZn"
 MODEL_FILENAME = "checkpoint_epoch_90.pth"
 
 def download_model_from_drive():
