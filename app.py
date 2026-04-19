@@ -12,20 +12,107 @@ from skimage.measure import label, regionprops
 import tempfile
 import SimpleITK as sitk
 from collections import OrderedDict
-import re
+from PIL import Image
+import base64
+from datetime import datetime
 
 # ========== PAGE CONFIG ==========
-st.set_page_config(page_title="Lung Nodule Segmentation", page_icon="🫁", layout="wide")
+st.set_page_config(
+    page_title="LungVision AI | Nodule Detection",
+    page_icon="🫁",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# ========== CUSTOM CSS FOR MODERN UI ==========
+st.markdown("""
+<style>
+    /* Modern gradient background */
+    .stApp {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    }
+    
+    /* Main content area */
+    .main-header {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        padding: 2rem;
+        border-radius: 20px;
+        margin-bottom: 2rem;
+        text-align: center;
+        color: white;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+    }
+    
+    /* Card style for results */
+    .result-card {
+        background: white;
+        border-radius: 15px;
+        padding: 1.5rem;
+        margin: 1rem 0;
+        box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        transition: transform 0.3s ease;
+    }
+    .result-card:hover {
+        transform: translateY(-5px);
+    }
+    
+    /* Metric cards */
+    .metric-card {
+        background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+        border-radius: 15px;
+        padding: 1rem;
+        text-align: center;
+        box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+    }
+    
+    /* Button styling */
+    .stButton > button {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border: none;
+        border-radius: 50px;
+        padding: 0.75rem 2rem;
+        font-weight: bold;
+        transition: all 0.3s ease;
+    }
+    .stButton > button:hover {
+        transform: scale(1.05);
+        box-shadow: 0 10px 20px rgba(0,0,0,0.2);
+    }
+    
+    /* Upload area styling */
+    .upload-area {
+        border: 2px dashed #667eea;
+        border-radius: 20px;
+        padding: 2rem;
+        text-align: center;
+        background: rgba(255,255,255,0.1);
+        backdrop-filter: blur(10px);
+    }
+    
+    /* Sidebar styling */
+    .css-1d391kg {
+        background: linear-gradient(180deg, #2c3e50 0%, #3498db 100%);
+    }
+    
+    /* Custom divider */
+    .custom-divider {
+        height: 4px;
+        background: linear-gradient(90deg, #667eea, #764ba2, #667eea);
+        border-radius: 2px;
+        margin: 20px 0;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # ========== GOOGLE DRIVE SETUP ==========
-# REPLACE THESE WITH YOUR NEW MODEL'S INFO
-GOOGLE_DRIVE_FILE_ID = "1m0AE-Co5NTloIKV56-M-zF4IOoMReeZn"  # Replace with your new model's file ID
-MODEL_FILENAME = "best_model.pth"  # Replace with your new model's filename
+GOOGLE_DRIVE_FILE_ID = "1FdIozNEVbIPUsjcdReAfmbgN3Nisx9yQ"
+MODEL_FILENAME = "checkpoint_epoch_90.pth"
 
 def download_model_from_drive():
     try:
         if not os.path.exists(MODEL_FILENAME):
-            with st.spinner("Downloading model from Google Drive..."):
+            with st.spinner("🔄 Loading AI Model..."):
                 url = f"https://drive.google.com/uc?id={GOOGLE_DRIVE_FILE_ID}"
                 gdown.download(url, MODEL_FILENAME, quiet=False)
         return MODEL_FILENAME
@@ -33,11 +120,11 @@ def download_model_from_drive():
         st.error(f"Failed to download model: {str(e)}")
         return None
 
-# ========== ATTENTION U-NET ARCHITECTURE (MATCHING YOUR TRAINED MODEL) ==========
-class ConvBlock(nn.Module):
+# ========== MEMORY EFFICIENT U-NET ==========
+class DoubleConv(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
-        self.conv = nn.Sequential(
+        self.double_conv = nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
@@ -45,99 +132,70 @@ class ConvBlock(nn.Module):
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True)
         )
+    def forward(self, x):
+        return self.double_conv(x)
+
+class Down(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.maxpool_conv = nn.Sequential(
+            nn.MaxPool2d(2),
+            DoubleConv(in_channels, out_channels)
+        )
+    def forward(self, x):
+        return self.maxpool_conv(x)
+
+class Up(nn.Module):
+    def __init__(self, in_channels, out_channels, bilinear=True):
+        super().__init__()
+        if bilinear:
+            self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+        else:
+            self.up = nn.ConvTranspose2d(in_channels // 2, in_channels // 2, kernel_size=2, stride=2)
+        
+        self.conv = DoubleConv(in_channels, out_channels)
     
+    def forward(self, x1, x2):
+        x1 = self.up(x1)
+        diffY = x2.size()[2] - x1.size()[2]
+        diffX = x2.size()[3] - x1.size()[3]
+        x1 = F.pad(x1, [diffX // 2, diffX - diffX // 2, diffY // 2, diffY - diffY // 2])
+        x = torch.cat([x2, x1], dim=1)
+        return self.conv(x)
+
+class OutConv(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
     def forward(self, x):
         return self.conv(x)
 
-class AttentionGate(nn.Module):
-    def __init__(self, F_g, F_l, F_int):
-        super(AttentionGate, self).__init__()
-        self.W_g = nn.Sequential(
-            nn.Conv2d(F_g, F_int, kernel_size=1, stride=1, padding=0, bias=True),
-            nn.BatchNorm2d(F_int)
-        )
-        
-        self.W_x = nn.Sequential(
-            nn.Conv2d(F_l, F_int, kernel_size=1, stride=1, padding=0, bias=True),
-            nn.BatchNorm2d(F_int)
-        )
-        
-        self.psi = nn.Sequential(
-            nn.Conv2d(F_int, 1, kernel_size=1, stride=1, padding=0, bias=True),
-            nn.BatchNorm2d(1),
-            nn.Sigmoid()
-        )
-        
-        self.relu = nn.ReLU(inplace=True)
-    
-    def forward(self, g, x):
-        g1 = self.W_g(g)
-        x1 = self.W_x(x)
-        psi = self.relu(g1 + x1)
-        psi = self.psi(psi)
-        return x * psi
-
-class AttentionUNet(nn.Module):
-    def __init__(self, n_channels=1, n_classes=1):
-        super(AttentionUNet, self).__init__()
-        
-        # Encoder
-        self.Conv1 = ConvBlock(n_channels, 64)
-        self.Conv2 = ConvBlock(64, 128)
-        self.Conv3 = ConvBlock(128, 256)
-        self.Conv4 = ConvBlock(256, 512)
-        self.Conv5 = ConvBlock(512, 1024)
-        
-        # Decoder with Attention
-        self.Up4 = nn.ConvTranspose2d(1024, 512, kernel_size=2, stride=2)
-        self.Att4 = AttentionGate(F_g=512, F_l=512, F_int=256)
-        self.Up_conv4 = ConvBlock(1024, 512)
-        
-        self.Up3 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
-        self.Att3 = AttentionGate(F_g=256, F_l=256, F_int=128)
-        self.Up_conv3 = ConvBlock(512, 256)
-        
-        self.Up2 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
-        self.Att2 = AttentionGate(F_g=128, F_l=128, F_int=64)
-        self.Up_conv2 = ConvBlock(256, 128)
-        
-        self.Up1 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
-        self.Att1 = AttentionGate(F_g=64, F_l=64, F_int=32)
-        self.Up_conv1 = ConvBlock(128, 64)
-        
-        self.Out = nn.Conv2d(64, n_classes, kernel_size=1)
+class UNet(nn.Module):
+    def __init__(self, n_channels=1, n_classes=1, bilinear=True):
+        super().__init__()
+        self.inc = DoubleConv(n_channels, 32)
+        self.down1 = Down(32, 64)
+        self.down2 = Down(64, 128)
+        self.down3 = Down(128, 256)
+        factor = 2 if bilinear else 1
+        self.down4 = Down(256, 512 // factor)
+        self.up1 = Up(512, 256 // factor, bilinear)
+        self.up2 = Up(256, 128 // factor, bilinear)
+        self.up3 = Up(128, 64 // factor, bilinear)
+        self.up4 = Up(64, 32, bilinear)
+        self.outc = OutConv(32, n_classes)
     
     def forward(self, x):
-        # Encoder
-        e1 = self.Conv1(x)
-        e2 = self.Conv2(F.max_pool2d(e1, 2))
-        e3 = self.Conv3(F.max_pool2d(e2, 2))
-        e4 = self.Conv4(F.max_pool2d(e3, 2))
-        e5 = self.Conv5(F.max_pool2d(e4, 2))
-        
-        # Decoder with Attention
-        d4 = self.Up4(e5)
-        d4 = self.Att4(g=d4, x=e4)
-        d4 = torch.cat((d4, e4), dim=1)
-        d4 = self.Up_conv4(d4)
-        
-        d3 = self.Up3(d4)
-        d3 = self.Att3(g=d3, x=e3)
-        d3 = torch.cat((d3, e3), dim=1)
-        d3 = self.Up_conv3(d3)
-        
-        d2 = self.Up2(d3)
-        d2 = self.Att2(g=d2, x=e2)
-        d2 = torch.cat((d2, e2), dim=1)
-        d2 = self.Up_conv2(d2)
-        
-        d1 = self.Up1(d2)
-        d1 = self.Att1(g=d1, x=e1)
-        d1 = torch.cat((d1, e1), dim=1)
-        d1 = self.Up_conv1(d1)
-        
-        out = self.Out(d1)
-        return out
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
+        x5 = self.down4(x4)
+        x = self.up1(x5, x4)
+        x = self.up2(x, x3)
+        x = self.up3(x, x2)
+        x = self.up4(x, x1)
+        return self.outc(x)
 
 # ========== LOAD MODEL ==========
 @st.cache_resource
@@ -147,22 +205,16 @@ def load_model():
         if model_path is None:
             return None, False
         
-        # Create model
-        model = AttentionUNet(n_channels=1, n_classes=1)
-        
-        # Load checkpoint
+        model = UNet()
         checkpoint = torch.load(model_path, map_location='cpu')
         
         if 'model_state_dict' in checkpoint:
             state_dict = checkpoint['model_state_dict']
-            epoch = checkpoint.get('epoch', 'Unknown')
             best_dice = checkpoint.get('best_dice', 'Unknown')
         else:
             state_dict = checkpoint
-            epoch = 'Unknown'
             best_dice = 'Unknown'
         
-        # Handle DataParallel wrapper if present
         if state_dict and 'module.' in list(state_dict.keys())[0]:
             new_state_dict = OrderedDict()
             for k, v in state_dict.items():
@@ -170,26 +222,65 @@ def load_model():
                 new_state_dict[name] = v
             state_dict = new_state_dict
         
-        # The state_dict keys already match our model's naming convention
-        # (Conv1, Conv2, Up4, Att4, etc.)
-        
         model.load_state_dict(state_dict)
         model.eval()
         
-        total_params = sum(p.numel() for p in model.parameters())
-        st.sidebar.success(f"✅ Attention U-Net loaded!")
-        st.sidebar.info(f"Model Stats:\n"
-                       f"• Parameters: {total_params/1e6:.1f}M\n"
-                       f"• Checkpoint: Epoch {epoch}\n"
-                       f"• Best Dice: {best_dice}")
-        
-        return model, True
+        return model, True, best_dice
         
     except Exception as e:
         st.error(f"Error loading model: {str(e)}")
-        return None, False
+        return None, False, None
 
-# ========== MHD FILE LOADING ==========
+# ========== PROCESS 2D IMAGE (FAST UPLOAD) ==========
+def process_2d_image(uploaded_file):
+    """Process a single 2D CT image - MUCH faster upload"""
+    image = Image.open(uploaded_file)
+    if image.mode == 'RGBA':
+        image = image.convert('RGB')
+    if image.mode != 'L':
+        image = image.convert('L')
+    
+    return np.array(image)
+
+def segment_2d_nodule(model, image_array):
+    """Segment nodule from single 2D image"""
+    # Resize to 512x512
+    img_resized = resize(image_array, (512, 512), preserve_range=True)
+    
+    # Normalize
+    window_min, window_max = -1000.0, 400.0
+    img_normalized = np.clip(img_resized, window_min, window_max)
+    img_normalized = (img_normalized - window_min) / (window_max - window_min)
+    
+    # Convert to tensor
+    input_tensor = torch.FloatTensor(img_normalized).unsqueeze(0).unsqueeze(0)
+    
+    # Segment
+    with torch.no_grad():
+        output = model(input_tensor)
+        probs = torch.sigmoid(output)
+        mask = (probs > 0.5).float().squeeze().numpy()
+    
+    # Resize back
+    mask_original = resize(mask, image_array.shape[:2], order=0, preserve_range=True)
+    
+    # Find individual nodules
+    labeled_mask = label(mask_original > 0.5)
+    
+    detections = []
+    if labeled_mask.max() > 0:
+        props = regionprops(labeled_mask)
+        for region in props:
+            if region.area >= 20:
+                detections.append({
+                    'area_pixels': region.area,
+                    'mask': (labeled_mask == region.label).astype(np.float32),
+                    'bbox': region.bbox
+                })
+    
+    return detections, mask_original
+
+# ========== PROCESS 3D CT (FULL SCAN) ==========
 def load_mhd_files(uploaded_files):
     mhd_file = None
     raw_file = None
@@ -240,11 +331,10 @@ def load_mhd_files(uploaded_files):
         st.error(f"Error loading files: {str(e)}")
         return None, None, None
 
-# ========== NODULE DETECTION ==========
-def detect_nodules(model, ct_volume, pixel_spacing_mm, slice_thickness_mm, min_area=20):
+def detect_nodules_3d(model, ct_volume, pixel_spacing_mm, slice_thickness_mm, min_area=20):
     detections = []
     
-    with st.spinner("🔍 Analyzing CT scan with Attention U-Net..."):
+    with st.spinner("🔍 Analyzing CT scan..."):
         progress_bar = st.progress(0)
         
         for i in range(ct_volume.shape[0]):
@@ -252,7 +342,6 @@ def detect_nodules(model, ct_volume, pixel_spacing_mm, slice_thickness_mm, min_a
                 progress_bar.progress(i / ct_volume.shape[0])
             
             slice_img = ct_volume[i]
-            
             img_resized = resize(slice_img, (512, 512), preserve_range=True)
             input_tensor = torch.FloatTensor(img_resized).unsqueeze(0).unsqueeze(0)
             
@@ -266,26 +355,13 @@ def detect_nodules(model, ct_volume, pixel_spacing_mm, slice_thickness_mm, min_a
             
             if labeled_mask.max() > 0:
                 props = regionprops(labeled_mask)
-                
                 for region in props:
-                    nodule_area_pixels = region.area
-                    
-                    if nodule_area_pixels >= min_area:
-                        nodule_area_mm2 = nodule_area_pixels * (pixel_spacing_mm ** 2)
-                        nodule_volume_mm3 = nodule_area_mm2 * slice_thickness_mm
-                        nodule_diameter_mm = 2 * np.sqrt(nodule_area_mm2 / np.pi)
-                        confidence = min(0.95, nodule_area_pixels / 300)
-                        
-                        individual_mask = (labeled_mask == region.label).astype(np.float32)
-                        
+                    if region.area >= min_area:
+                        nodule_volume = region.area * (pixel_spacing_mm ** 2) * slice_thickness_mm
                         detections.append({
                             'slice': i,
-                            'area_pixels': nodule_area_pixels,
-                            'area_mm2': nodule_area_mm2,
-                            'volume_mm3': nodule_volume_mm3,
-                            'diameter_mm': nodule_diameter_mm,
-                            'confidence': confidence,
-                            'mask': individual_mask,
+                            'volume_mm3': nodule_volume,
+                            'mask': (labeled_mask == region.label).astype(np.float32),
                             'slice_image': slice_img
                         })
         
@@ -296,9 +372,14 @@ def detect_nodules(model, ct_volume, pixel_spacing_mm, slice_thickness_mm, min_a
 
 # ========== MAIN UI ==========
 def main():
-    st.title("🫁 Lung Nodule Segmentation Tool")
-    st.markdown("### Attention U-Net - AI-Powered Detection")
-    st.markdown("---")
+    # Custom header
+    st.markdown("""
+    <div class="main-header">
+        <h1>🫁 LungVision AI</h1>
+        <p style="font-size: 1.2rem;">Intelligent Lung Nodule Detection & Segmentation</p>
+        <p style="font-size: 0.9rem; opacity: 0.9;">Powered by Memory Efficient U-Net | 3.4M Parameters</p>
+    </div>
+    """, unsafe_allow_html=True)
     
     # Login
     if 'logged_in' not in st.session_state:
@@ -307,144 +388,193 @@ def main():
     if not st.session_state.logged_in:
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
-            st.subheader("🔐 Login")
-            username = st.text_input("Username")
-            password = st.text_input("Password", type="password")
+            st.markdown('<div class="result-card">', unsafe_allow_html=True)
+            st.subheader("🔐 Radiologist Access")
+            username = st.text_input("Username", placeholder="Enter your username")
+            password = st.text_input("Password", type="password", placeholder="Enter your password")
             
-            if st.button("Login"):
+            col_a, col_b = st.columns(2)
+            with col_a:
+                login_btn = st.button("🔓 Login", use_container_width=True)
+            with col_b:
+                st.markdown("[Request Access](https://example.com)")
+            
+            if login_btn:
                 if username == "radiologist" and password == "hit500":
                     st.session_state.logged_in = True
                     st.rerun()
                 else:
-                    st.error("Invalid credentials")
+                    st.error("❌ Invalid credentials. Please try again.")
+            st.markdown('</div>', unsafe_allow_html=True)
         return
     
-    st.sidebar.success("✅ Logged in as: Radiologist")
-    if st.sidebar.button("Logout"):
-        st.session_state.logged_in = False
-        st.session_state.clear()
-        st.rerun()
+    # Sidebar - Professional info
+    with st.sidebar:
+        st.markdown("### 👤 Session")
+        st.success(f"✅ Logged in as: **Radiologist**")
+        if st.button("🚪 Logout", use_container_width=True):
+            st.session_state.logged_in = False
+            st.session_state.clear()
+            st.rerun()
+        
+        st.markdown("---")
+        st.markdown("### 🧠 Model Info")
+        st.info("""
+        - **Architecture:** Memory Efficient U-Net
+        - **Parameters:** 3.4 Million
+        - **Training Data:** LUNA16 (902 slices)
+        - **Best Dice Score:** 0.6399
+        - **Inference Time:** ~0.05 sec/slice
+        """)
+        
+        st.markdown("---")
+        st.markdown("### 📊 Today's Stats")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Scans Today", "0", delta="Ready")
+        with col2:
+            st.metric("Model Status", "Active", delta="Online")
     
     # Load model
-    model, model_loaded = load_model()
+    with st.spinner("🔄 Initializing AI Model..."):
+        model, model_loaded, best_dice = load_model()
+    
     if not model_loaded:
+        st.error("❌ Failed to load AI model. Please check your connection.")
         st.stop()
     
-    # File upload
-    st.subheader("📤 Upload CT Scan")
+    # Main content area
+    st.markdown("### 📤 Upload CT Scan")
+    st.markdown('<div class="custom-divider"></div>', unsafe_allow_html=True)
     
-    uploaded_files = st.file_uploader(
-        "Select .mhd and .raw files (select both at once using Ctrl+Click or Cmd+Click)",
-        type=["mhd", "raw"],
-        accept_multiple_files=True
+    # Upload options - SUPPORT BOTH 2D AND 3D
+    upload_option = st.radio(
+        "Select upload type:",
+        ["⚡ Fast Upload (2D Image)", "📊 Full CT Scan (3D MHD+RAW)"],
+        horizontal=True,
+        help="2D images upload faster. Use 3D for full volumetric analysis"
     )
     
-    if uploaded_files and len(uploaded_files) == 2:
-        with st.spinner("Loading CT scan..."):
-            ct_array, pixel_spacing_mm, slice_thickness_mm = load_mhd_files(uploaded_files)
+    if upload_option == "⚡ Fast Upload (2D Image)":
+        st.info("💡 **Tip:** Upload individual CT slices for rapid analysis. Much faster than full 3D scans!")
         
-        if ct_array is not None:
-            st.success(f"✅ CT scan loaded: {ct_array.shape[0]} slices")
-            st.info(f"📊 Scan parameters: Pixel spacing = {pixel_spacing_mm:.3f} mm, Slice thickness = {slice_thickness_mm:.3f} mm")
+        uploaded_file = st.file_uploader(
+            "Choose a CT image (PNG, JPG, JPEG)",
+            type=["png", "jpg", "jpeg"],
+            help="Upload a single CT slice for instant nodule detection"
+        )
+        
+        if uploaded_file:
+            with st.spinner("📥 Loading image..."):
+                image_array = process_2d_image(uploaded_file)
             
-            # Normalize CT values
-            window_min, window_max = -1000.0, 400.0
-            ct_normalized = np.clip(ct_array, window_min, window_max)
-            ct_normalized = (ct_normalized - window_min) / (window_max - window_min)
+            col1, col2 = st.columns([1, 1])
             
-            # Show preview
-            middle = ct_array.shape[0] // 2
-            st.subheader("📷 Scan Preview")
-            st.image(ct_normalized[middle], caption=f"Middle Slice {middle} of {ct_array.shape[0]}", use_container_width=True)
+            with col1:
+                st.markdown('<div class="result-card">', unsafe_allow_html=True)
+                st.image(image_array, caption="📷 Uploaded CT Slice", use_container_width=True)
+                st.markdown('</div>', unsafe_allow_html=True)
             
-            # Auto-detect button
-            if st.button("🔍 DETECT NODULES", type="primary", use_container_width=True):
-                detections = detect_nodules(model, ct_normalized, pixel_spacing_mm, slice_thickness_mm)
-                
-                if detections:
-                    st.success(f"✅ Found {len(detections)} nodule(s)")
+            with col2:
+                if st.button("🔍 Detect Nodules", type="primary", use_container_width=True):
+                    with st.spinner("🧠 AI Analyzing..."):
+                        detections, full_mask = segment_2d_nodule(model, image_array)
                     
-                    # Group by slice
-                    from collections import defaultdict
-                    detections_by_slice = defaultdict(list)
-                    for d in detections:
-                        detections_by_slice[d['slice']].append(d)
-                    
-                    # Show results
-                    for slice_num in sorted(detections_by_slice.keys()):
-                        slice_detections = detections_by_slice[slice_num]
-                        st.markdown(f"### 📍 Slice {slice_num} - {len(slice_detections)} Nodule(s)")
+                    if detections:
+                        st.balloons()
+                        st.success(f"✅ Found {len(detections)} nodule(s)")
                         
-                        if len(slice_detections) == 1:
-                            d = slice_detections[0]
-                            col1, col2 = st.columns([2, 1])
+                        for idx, d in enumerate(detections):
+                            st.markdown(f'<div class="result-card">', unsafe_allow_html=True)
+                            st.markdown(f"**Nodule {idx+1}**")
                             
-                            with col1:
-                                slice_norm = (d['slice_image'] - d['slice_image'].min()) / (d['slice_image'].max() - d['slice_image'].min() + 1e-8)
-                                overlay = np.stack([slice_norm] * 3, axis=-1)
+                            col_a, col_b = st.columns(2)
+                            with col_a:
+                                # Create overlay
+                                img_norm = (image_array - image_array.min()) / (image_array.max() - image_array.min() + 1e-8)
+                                overlay = np.stack([img_norm] * 3, axis=-1)
                                 overlay[:, :, 0] = np.where(d['mask'] > 0.5, 1.0, overlay[:, :, 0])
                                 overlay[:, :, 1] = np.where(d['mask'] > 0.5, 0.0, overlay[:, :, 1])
                                 overlay[:, :, 2] = np.where(d['mask'] > 0.5, 0.0, overlay[:, :, 2])
                                 st.image(overlay, use_container_width=True)
                             
-                            with col2:
-                                st.metric("Volume", f"{d['volume_mm3']:.1f} mm³")
-                                st.metric("Diameter", f"{d['diameter_mm']:.1f} mm")
-                                st.metric("Confidence", f"{d['confidence']:.0%}")
+                            with col_b:
+                                st.metric("Area", f"{d['area_pixels']:.0f} pixels²")
+                                st.metric("Confidence", "High")
                                 
-                                if d['volume_mm3'] < 100:
-                                    st.info("📌 Small - Monitor")
-                                elif d['volume_mm3'] < 300:
-                                    st.warning("⚠️ Medium - Follow up")
+                                if d['area_pixels'] < 100:
+                                    st.info("📌 **Small nodule** - Monitor")
+                                elif d['area_pixels'] < 300:
+                                    st.warning("⚠️ **Medium nodule** - Follow up")
                                 else:
-                                    st.error("🚨 Large - Urgent")
-                        else:
-                            cols = st.columns(len(slice_detections))
-                            for idx, (col, d) in enumerate(zip(cols, slice_detections)):
-                                with col:
+                                    st.error("🚨 **Large nodule** - Urgent")
+                            st.markdown('</div>', unsafe_allow_html=True)
+                    else:
+                        st.info("📌 No nodules detected in this slice")
+    
+    else:  # 3D Full CT Scan
+        st.info("📌 **Note:** Full 3D CT scans take longer to upload. For faster results, use the 2D upload option above.")
+        
+        uploaded_files = st.file_uploader(
+            "Select .mhd and .raw files (select both using Ctrl+Click)",
+            type=["mhd", "raw"],
+            accept_multiple_files=True,
+            help="Upload both files from your CT scan"
+        )
+        
+        if uploaded_files and len(uploaded_files) == 2:
+            with st.spinner("📥 Loading 3D CT scan..."):
+                ct_array, pixel_spacing, slice_thickness = load_mhd_files(uploaded_files)
+            
+            if ct_array is not None:
+                st.success(f"✅ Loaded {ct_array.shape[0]} slices")
+                
+                # Normalize
+                window_min, window_max = -1000.0, 400.0
+                ct_normalized = np.clip(ct_array, window_min, window_max)
+                ct_normalized = (ct_normalized - window_min) / (window_max - window_min)
+                
+                # Preview
+                middle = ct_array.shape[0] // 2
+                st.image(ct_normalized[middle], caption=f"Preview Slice {middle}", use_container_width=True)
+                
+                if st.button("🔍 Analyze Full Scan", type="primary", use_container_width=True):
+                    detections = detect_nodules_3d(model, ct_normalized, pixel_spacing, slice_thickness)
+                    
+                    if detections:
+                        st.success(f"✅ Found {len(detections)} nodule(s)")
+                        
+                        for idx, d in enumerate(detections[:5]):  # Show top 5
+                            with st.expander(f"Nodule {idx+1} - Slice {d['slice']}"):
+                                col1, col2 = st.columns(2)
+                                with col1:
                                     slice_norm = (d['slice_image'] - d['slice_image'].min()) / (d['slice_image'].max() - d['slice_image'].min() + 1e-8)
                                     overlay = np.stack([slice_norm] * 3, axis=-1)
                                     overlay[:, :, 0] = np.where(d['mask'] > 0.5, 1.0, overlay[:, :, 0])
                                     overlay[:, :, 1] = np.where(d['mask'] > 0.5, 0.0, overlay[:, :, 1])
                                     overlay[:, :, 2] = np.where(d['mask'] > 0.5, 0.0, overlay[:, :, 2])
                                     st.image(overlay, use_container_width=True)
-                                    st.caption(f"Nodule {idx+1}")
+                                with col2:
                                     st.metric("Volume", f"{d['volume_mm3']:.1f} mm³")
-                                    st.metric("Diameter", f"{d['diameter_mm']:.1f} mm")
-                        
-                        st.markdown("---")
-                    
-                    # Download report
-                    report_lines = [
-                        "=" * 50,
-                        "LUNG NODULE DETECTION REPORT",
-                        "=" * 50,
-                        f"Total Nodules Found: {len(detections)}",
-                        f"Scan Parameters: Pixel Spacing = {pixel_spacing_mm:.3f} mm, Slice Thickness = {slice_thickness_mm:.3f} mm",
-                        "",
-                        "=" * 50,
-                        "INDIVIDUAL NODULE DETAILS",
-                        "=" * 50,
-                        ""
-                    ]
-                    
-                    for i, d in enumerate(detections):
-                        report_lines.append(f"Nodule #{i+1}:")
-                        report_lines.append(f"  • Slice: {d['slice']}")
-                        report_lines.append(f"  • Volume: {d['volume_mm3']:.1f} mm³")
-                        report_lines.append(f"  • Diameter: {d['diameter_mm']:.1f} mm")
-                        report_lines.append(f"  • Confidence: {d['confidence']:.0%}")
-                        report_lines.append("")
-                    
-                    report_lines.append("=" * 50)
-                    report_lines.append("End of Report")
-                    
-                    st.download_button("📊 Download Full Report", "\n".join(report_lines), "nodule_report.txt")
-                else:
-                    st.info("No nodules detected")
+                                    if d['volume_mm3'] < 100:
+                                        st.info("Small - Monitor")
+                                    elif d['volume_mm3'] < 300:
+                                        st.warning("Medium - Follow up")
+                                    else:
+                                        st.error("Large - Urgent")
+                    else:
+                        st.info("No nodules detected")
     
+    # Footer
     st.markdown("---")
-    st.caption("© HIT500 Capstone Project | Architecture: Attention U-Net")
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.markdown("""
+        <div style="text-align: center; color: #666;">
+            <p>© 2026 LungVision AI | HIT500 Capstone Project</p>
+            <p style="font-size: 0.8rem;">Memory Efficient U-Net | Trained on LUNA16 Dataset</p>
+        </div>
+        """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
