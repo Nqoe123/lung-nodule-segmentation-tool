@@ -18,7 +18,7 @@ st.set_page_config(page_title="Lung Nodule Segmentation", page_icon="🫁", layo
 
 # ========== GOOGLE DRIVE SETUP ==========
 GOOGLE_DRIVE_FILE_ID = "1m0AE-Co5NTloIKV56-M-zF4IOoMReeZn"
-MODEL_FILENAME = "checkpoint_epoch_90.pth"
+MODEL_FILENAME = "best_model.pth"
 
 def download_model_from_drive():
     try:
