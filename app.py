@@ -12,9 +12,10 @@ from skimage.measure import label, regionprops
 import tempfile
 import SimpleITK as sitk
 from collections import OrderedDict
+import re
 
 # ========== PAGE CONFIG ==========
-st.set_page_config(page_title="Lung Nodule Segmentation - Attention U-Net", page_icon="🫁", layout="wide")
+st.set_page_config(page_title="Lung Nodule Segmentation", page_icon="🫁", layout="wide")
 
 # ========== GOOGLE DRIVE SETUP ==========
 # REPLACE THESE WITH YOUR NEW MODEL'S INFO
@@ -32,11 +33,25 @@ def download_model_from_drive():
         st.error(f"Failed to download model: {str(e)}")
         return None
 
-# ========== ATTENTION U-NET ARCHITECTURE ==========
-class AttentionBlock(nn.Module):
-    """Attention gate for Attention U-Net"""
+# ========== ATTENTION U-NET ARCHITECTURE (MATCHING YOUR TRAINED MODEL) ==========
+class ConvBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+    
+    def forward(self, x):
+        return self.conv(x)
+
+class AttentionGate(nn.Module):
     def __init__(self, F_g, F_l, F_int):
-        super(AttentionBlock, self).__init__()
+        super(AttentionGate, self).__init__()
         self.W_g = nn.Sequential(
             nn.Conv2d(F_g, F_int, kernel_size=1, stride=1, padding=0, bias=True),
             nn.BatchNorm2d(F_int)
@@ -62,113 +77,67 @@ class AttentionBlock(nn.Module):
         psi = self.psi(psi)
         return x * psi
 
-class DoubleConv(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        self.conv = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True)
-        )
-    
-    def forward(self, x):
-        return self.conv(x)
-
-class Down(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        self.maxpool_conv = nn.Sequential(
-            nn.MaxPool2d(2),
-            DoubleConv(in_channels, out_channels)
-        )
-    
-    def forward(self, x):
-        return self.maxpool_conv(x)
-
-class Up(nn.Module):
-    def __init__(self, in_channels, out_channels, bilinear=False):
-        super().__init__()
-        if bilinear:
-            self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
-        else:
-            self.up = nn.ConvTranspose2d(in_channels // 2, in_channels // 2, kernel_size=2, stride=2)
-        
-        self.conv = DoubleConv(in_channels, out_channels)
-    
-    def forward(self, x1, x2):
-        x1 = self.up(x1)
-        diffY = x2.size()[2] - x1.size()[2]
-        diffX = x2.size()[3] - x1.size()[3]
-        x1 = F.pad(x1, [diffX // 2, diffX - diffX // 2,
-                        diffY // 2, diffY - diffY // 2])
-        x = torch.cat([x2, x1], dim=1)
-        return self.conv(x)
-
-class OutConv(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(OutConv, self).__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
-    
-    def forward(self, x):
-        return self.conv(x)
-
 class AttentionUNet(nn.Module):
-    """Attention U-Net - for your new trained model"""
-    def __init__(self, n_channels=1, n_classes=1, bilinear=False):
+    def __init__(self, n_channels=1, n_classes=1):
         super(AttentionUNet, self).__init__()
-        self.n_channels = n_channels
-        self.n_classes = n_classes
-        self.bilinear = bilinear
         
         # Encoder
-        self.inc = DoubleConv(n_channels, 64)
-        self.down1 = Down(64, 128)
-        self.down2 = Down(128, 256)
-        self.down3 = Down(256, 512)
-        factor = 2 if bilinear else 1
-        self.down4 = Down(512, 1024 // factor)
+        self.Conv1 = ConvBlock(n_channels, 64)
+        self.Conv2 = ConvBlock(64, 128)
+        self.Conv3 = ConvBlock(128, 256)
+        self.Conv4 = ConvBlock(256, 512)
+        self.Conv5 = ConvBlock(512, 1024)
         
         # Decoder with Attention
-        self.up1 = Up(1024, 512 // factor, bilinear)
-        self.att1 = AttentionBlock(F_g=512 // factor, F_l=512, F_int=256)
+        self.Up4 = nn.ConvTranspose2d(1024, 512, kernel_size=2, stride=2)
+        self.Att4 = AttentionGate(F_g=512, F_l=512, F_int=256)
+        self.Up_conv4 = ConvBlock(1024, 512)
         
-        self.up2 = Up(512, 256 // factor, bilinear)
-        self.att2 = AttentionBlock(F_g=256 // factor, F_l=256, F_int=128)
+        self.Up3 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
+        self.Att3 = AttentionGate(F_g=256, F_l=256, F_int=128)
+        self.Up_conv3 = ConvBlock(512, 256)
         
-        self.up3 = Up(256, 128 // factor, bilinear)
-        self.att3 = AttentionBlock(F_g=128 // factor, F_l=128, F_int=64)
+        self.Up2 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
+        self.Att2 = AttentionGate(F_g=128, F_l=128, F_int=64)
+        self.Up_conv2 = ConvBlock(256, 128)
         
-        self.up4 = Up(128, 64, bilinear)
-        self.att4 = AttentionBlock(F_g=64, F_l=64, F_int=32)
+        self.Up1 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+        self.Att1 = AttentionGate(F_g=64, F_l=64, F_int=32)
+        self.Up_conv1 = ConvBlock(128, 64)
         
-        self.outc = OutConv(64, n_classes)
+        self.Out = nn.Conv2d(64, n_classes, kernel_size=1)
     
     def forward(self, x):
         # Encoder
-        x1 = self.inc(x)
-        x2 = self.down1(x1)
-        x3 = self.down2(x2)
-        x4 = self.down3(x3)
-        x5 = self.down4(x4)
+        e1 = self.Conv1(x)
+        e2 = self.Conv2(F.max_pool2d(e1, 2))
+        e3 = self.Conv3(F.max_pool2d(e2, 2))
+        e4 = self.Conv4(F.max_pool2d(e3, 2))
+        e5 = self.Conv5(F.max_pool2d(e4, 2))
         
         # Decoder with Attention
-        d4 = self.up1(x5, x4)
-        d4 = self.att1(g=d4, x=x4)
+        d4 = self.Up4(e5)
+        d4 = self.Att4(g=d4, x=e4)
+        d4 = torch.cat((d4, e4), dim=1)
+        d4 = self.Up_conv4(d4)
         
-        d3 = self.up2(d4, x3)
-        d3 = self.att2(g=d3, x=x3)
+        d3 = self.Up3(d4)
+        d3 = self.Att3(g=d3, x=e3)
+        d3 = torch.cat((d3, e3), dim=1)
+        d3 = self.Up_conv3(d3)
         
-        d2 = self.up3(d3, x2)
-        d2 = self.att3(g=d2, x=x2)
+        d2 = self.Up2(d3)
+        d2 = self.Att2(g=d2, x=e2)
+        d2 = torch.cat((d2, e2), dim=1)
+        d2 = self.Up_conv2(d2)
         
-        d1 = self.up4(d2, x1)
-        d1 = self.att4(g=d1, x=x1)
+        d1 = self.Up1(d2)
+        d1 = self.Att1(g=d1, x=e1)
+        d1 = torch.cat((d1, e1), dim=1)
+        d1 = self.Up_conv1(d1)
         
-        logits = self.outc(d1)
-        return logits
+        out = self.Out(d1)
+        return out
 
 # ========== LOAD MODEL ==========
 @st.cache_resource
@@ -178,9 +147,10 @@ def load_model():
         if model_path is None:
             return None, False
         
-        # Use AttentionUNet for your new model
-        model = AttentionUNet(n_channels=1, n_classes=1, bilinear=False)
+        # Create model
+        model = AttentionUNet(n_channels=1, n_classes=1)
         
+        # Load checkpoint
         checkpoint = torch.load(model_path, map_location='cpu')
         
         if 'model_state_dict' in checkpoint:
@@ -200,6 +170,9 @@ def load_model():
                 new_state_dict[name] = v
             state_dict = new_state_dict
         
+        # The state_dict keys already match our model's naming convention
+        # (Conv1, Conv2, Up4, Att4, etc.)
+        
         model.load_state_dict(state_dict)
         model.eval()
         
@@ -208,8 +181,7 @@ def load_model():
         st.sidebar.info(f"Model Stats:\n"
                        f"• Parameters: {total_params/1e6:.1f}M\n"
                        f"• Checkpoint: Epoch {epoch}\n"
-                       f"• Best Dice: {best_dice}\n"
-                       f"• Architecture: Attention U-Net")
+                       f"• Best Dice: {best_dice}")
         
         return model, True
         
@@ -314,9 +286,7 @@ def detect_nodules(model, ct_volume, pixel_spacing_mm, slice_thickness_mm, min_a
                             'diameter_mm': nodule_diameter_mm,
                             'confidence': confidence,
                             'mask': individual_mask,
-                            'slice_image': slice_img,
-                            'bbox': region.bbox,
-                            'centroid': region.centroid
+                            'slice_image': slice_img
                         })
         
         progress_bar.empty()
@@ -375,6 +345,7 @@ def main():
         
         if ct_array is not None:
             st.success(f"✅ CT scan loaded: {ct_array.shape[0]} slices")
+            st.info(f"📊 Scan parameters: Pixel spacing = {pixel_spacing_mm:.3f} mm, Slice thickness = {slice_thickness_mm:.3f} mm")
             
             # Normalize CT values
             window_min, window_max = -1000.0, 400.0
@@ -444,11 +415,31 @@ def main():
                         st.markdown("---")
                     
                     # Download report
-                    report_lines = [f"Attention U-Net Detection Report", f"Total Nodules: {len(detections)}", ""]
-                    for i, d in enumerate(detections):
-                        report_lines.append(f"Nodule {i+1}: Slice {d['slice']}, Volume: {d['volume_mm3']:.1f}mm³, Diameter: {d['diameter_mm']:.1f}mm, Confidence: {d['confidence']:.0%}")
+                    report_lines = [
+                        "=" * 50,
+                        "LUNG NODULE DETECTION REPORT",
+                        "=" * 50,
+                        f"Total Nodules Found: {len(detections)}",
+                        f"Scan Parameters: Pixel Spacing = {pixel_spacing_mm:.3f} mm, Slice Thickness = {slice_thickness_mm:.3f} mm",
+                        "",
+                        "=" * 50,
+                        "INDIVIDUAL NODULE DETAILS",
+                        "=" * 50,
+                        ""
+                    ]
                     
-                    st.download_button("📊 Download Report", "\n".join(report_lines), "nodule_report.txt")
+                    for i, d in enumerate(detections):
+                        report_lines.append(f"Nodule #{i+1}:")
+                        report_lines.append(f"  • Slice: {d['slice']}")
+                        report_lines.append(f"  • Volume: {d['volume_mm3']:.1f} mm³")
+                        report_lines.append(f"  • Diameter: {d['diameter_mm']:.1f} mm")
+                        report_lines.append(f"  • Confidence: {d['confidence']:.0%}")
+                        report_lines.append("")
+                    
+                    report_lines.append("=" * 50)
+                    report_lines.append("End of Report")
+                    
+                    st.download_button("📊 Download Full Report", "\n".join(report_lines), "nodule_report.txt")
                 else:
                     st.info("No nodules detected")
     
