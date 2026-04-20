@@ -14,6 +14,8 @@ import SimpleITK as sitk
 from collections import OrderedDict
 from PIL import Image
 import warnings
+from datetime import datetime
+
 warnings.filterwarnings('ignore')
 
 # ========== PAGE CONFIG ==========
@@ -21,85 +23,150 @@ st.set_page_config(
     page_title="LungVision AI | Clinical Nodule Detection",
     page_icon="🫁",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"
 )
 
 # ========== PROFESSIONAL MEDICAL CSS ==========
 st.markdown("""
 <style>
-    /* Professional medical color scheme - Clean white/blue */
-    .stApp {
-        background-color: #f0f2f6;
+    /* Main container */
+    .main {
+        background-color: #f7f9fc;
     }
     
-    /* Main header - clean medical style */
-    .main-header {
-        background: linear-gradient(90deg, #1a365d 0%, #2b6cb0 100%);
-        padding: 1.5rem;
-        border-radius: 10px;
+    /* Header styling */
+    .clinical-header {
+        background: linear-gradient(135deg, #1e3a5f 0%, #2c5282 100%);
+        padding: 1.8rem;
+        border-radius: 12px;
         margin-bottom: 2rem;
         text-align: center;
         color: white;
-        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
     }
     
-    /* Card style for results - clean white */
-    .result-card {
+    .clinical-header h1 {
+        margin: 0;
+        font-size: 2rem;
+        font-weight: 600;
+        letter-spacing: -0.5px;
+    }
+    
+    .clinical-header p {
+        margin: 0.5rem 0 0 0;
+        opacity: 0.9;
+        font-size: 1rem;
+    }
+    
+    .clinical-header small {
+        font-size: 0.8rem;
+        opacity: 0.75;
+    }
+    
+    /* Card styling */
+    .clinical-card {
         background: white;
-        border-radius: 10px;
+        border-radius: 12px;
         padding: 1.5rem;
         margin: 1rem 0;
         border: 1px solid #e2e8f0;
         box-shadow: 0 1px 3px rgba(0,0,0,0.05);
     }
     
-    /* Metric cards */
+    /* Metric card */
     .metric-card {
         background: white;
         border-radius: 10px;
         padding: 1rem;
         text-align: center;
         border: 1px solid #e2e8f0;
-        border-left: 4px solid #2b6cb0;
+        border-top: 4px solid #2c5282;
     }
     
-    /* Button styling - medical blue */
-    .stButton > button {
-        background-color: #2b6cb0;
-        color: white;
-        border: none;
+    /* Info box */
+    .info-box {
+        background: #ebf8ff;
+        border-left: 4px solid #2c5282;
+        padding: 1rem;
         border-radius: 8px;
-        padding: 0.6rem 1.5rem;
-        font-weight: 500;
-        transition: all 0.2s ease;
-    }
-    .stButton > button:hover {
-        background-color: #1a365d;
-        transform: translateY(-1px);
+        margin: 1rem 0;
     }
     
-    /* Warning box for wrong image types */
+    /* Warning box */
     .warning-box {
-        background-color: #fff5f5;
+        background: #fff5f5;
         border-left: 4px solid #e53e3e;
         padding: 1rem;
         border-radius: 8px;
         margin: 1rem 0;
     }
     
-    /* Info box */
-    .info-box {
-        background-color: #ebf8ff;
-        border-left: 4px solid #2b6cb0;
+    /* Success box */
+    .success-box {
+        background: #f0fff4;
+        border-left: 4px solid #38a169;
         padding: 1rem;
         border-radius: 8px;
         margin: 1rem 0;
     }
     
-    /* Sidebar styling */
-    .css-1d391kg {
-        background-color: white;
-        border-right: 1px solid #e2e8f0;
+    /* Button styling */
+    .stButton > button {
+        background-color: #2c5282;
+        color: white;
+        border: none;
+        border-radius: 8px;
+        padding: 0.6rem 1.5rem;
+        font-weight: 500;
+        width: 100%;
+        transition: all 0.2s ease;
+    }
+    .stButton > button:hover {
+        background-color: #1e3a5f;
+        transform: translateY(-1px);
+        box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    }
+    
+    /* Upload area */
+    .upload-area {
+        border: 2px dashed #cbd5e0;
+        border-radius: 12px;
+        padding: 2rem;
+        text-align: center;
+        background: #fafbfc;
+    }
+    
+    /* Footer */
+    .clinical-footer {
+        text-align: center;
+        padding: 1.5rem;
+        margin-top: 2rem;
+        border-top: 1px solid #e2e8f0;
+        color: #718096;
+        font-size: 0.8rem;
+    }
+    
+    /* Divider */
+    .divider {
+        height: 1px;
+        background: linear-gradient(90deg, transparent, #cbd5e0, transparent);
+        margin: 1.5rem 0;
+    }
+    
+    /* Table styling */
+    table {
+        width: 100%;
+        border-collapse: collapse;
+    }
+    th {
+        background-color: #f7f9fc;
+        padding: 8px;
+        text-align: left;
+        border-bottom: 2px solid #e2e8f0;
+    }
+    td {
+        padding: 8px;
+        border-bottom: 1px solid #e2e8f0;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -108,18 +175,43 @@ st.markdown("""
 GOOGLE_DRIVE_FILE_ID = "1FdIozNEVbIPUsjcdReAfmbgN3Nisx9yQ"
 MODEL_FILENAME = "checkpoint_epoch_90.pth"
 
-def download_model_from_drive():
+@st.cache_resource
+def download_and_load_model():
+    """Download model from Google Drive and load it"""
     try:
+        # Download if not exists
         if not os.path.exists(MODEL_FILENAME):
-            with st.spinner("Loading AI Model..."):
+            with st.spinner("Downloading AI model..."):
                 url = f"https://drive.google.com/uc?id={GOOGLE_DRIVE_FILE_ID}"
-                gdown.download(url, MODEL_FILENAME, quiet=False)
-        return MODEL_FILENAME
+                gdown.download(url, MODEL_FILENAME, quiet=True)
+        
+        # Load model
+        model = UNet()
+        checkpoint = torch.load(MODEL_FILENAME, map_location='cpu')
+        
+        if 'model_state_dict' in checkpoint:
+            state_dict = checkpoint['model_state_dict']
+        else:
+            state_dict = checkpoint
+        
+        # Remove DataParallel wrapper if present
+        if 'module.' in list(state_dict.keys())[0]:
+            new_state_dict = OrderedDict()
+            for k, v in state_dict.items():
+                name = k[7:]
+                new_state_dict[name] = v
+            state_dict = new_state_dict
+        
+        model.load_state_dict(state_dict)
+        model.eval()
+        
+        return model, True
+        
     except Exception as e:
-        st.error(f"Failed to download model: {str(e)}")
-        return None
+        st.error(f"Model Error: {str(e)}")
+        return None, False
 
-# ========== MEMORY EFFICIENT U-NET ==========
+# ========== U-NET ARCHITECTURE ==========
 class DoubleConv(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
@@ -151,7 +243,6 @@ class Up(nn.Module):
             self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
         else:
             self.up = nn.ConvTranspose2d(in_channels // 2, in_channels // 2, kernel_size=2, stride=2)
-        
         self.conv = DoubleConv(in_channels, out_channels)
     
     def forward(self, x1, x2):
@@ -196,132 +287,49 @@ class UNet(nn.Module):
         x = self.up4(x, x1)
         return self.outc(x)
 
-# ========== LOAD MODEL ==========
-@st.cache_resource
-def load_model():
-    try:
-        model_path = download_model_from_drive()
-        if model_path is None:
-            return None, False
-        
-        model = UNet()
-        checkpoint = torch.load(model_path, map_location='cpu')
-        
-        if 'model_state_dict' in checkpoint:
-            state_dict = checkpoint['model_state_dict']
-            best_dice = checkpoint.get('best_dice', 'Unknown')
-        else:
-            state_dict = checkpoint
-            best_dice = 'Unknown'
-        
-        if state_dict and 'module.' in list(state_dict.keys())[0]:
-            new_state_dict = OrderedDict()
-            for k, v in state_dict.items():
-                name = k[7:]
-                new_state_dict[name] = v
-            state_dict = new_state_dict
-        
-        model.load_state_dict(state_dict)
-        model.eval()
-        
-        return model, True, best_dice
-        
-    except Exception as e:
-        st.error(f"Error loading model: {str(e)}")
-        return None, False, None
-
-# ========== VALIDATE IMAGE TYPE (Prevent wrong inputs) ==========
-def validate_lung_image(image_array):
-    """
-    Validate if the image appears to be a lung CT scan
-    Returns: (is_valid, reason)
-    """
-    # Check image statistics
-    mean_intensity = np.mean(image_array)
-    std_intensity = np.std(image_array)
-    
-    # Lung CT typically has:
-    # - Mean around 0.3-0.7 after normalization
-    # - Standard deviation around 0.15-0.35
-    # - Dark areas (lungs) and bright areas (nodules/vessels)
-    
-    if mean_intensity < 0.1 or mean_intensity > 0.9:
-        return False, "Image intensity range doesn't match typical CT scans"
-    
-    if std_intensity < 0.05:
-        return False, "Image appears too uniform - not a typical CT scan"
-    
-    # Check aspect ratio (lung CT slices are usually square-ish)
-    h, w = image_array.shape
-    aspect_ratio = max(h, w) / min(h, w)
-    if aspect_ratio > 2:
-        return False, "Image aspect ratio unusual for CT slice"
-    
-    return True, "Valid lung CT"
-
-def normalize_ct_window(image_array):
-    """
-    Properly normalize CT image using lung window [-1000, 400] HU
-    """
-    # If image is already in 0-1 range, assume it's normalized
-    if image_array.max() <= 1.0:
-        # Apply lung window normalization
-        # Convert back to HU range assumption
-        image_hu = image_array * 1400 - 1000
-        image_hu = np.clip(image_hu, -1000, 400)
-        normalized = (image_hu + 1000) / 1400
-        return normalized
-    else:
-        # Assume raw CT values (0-255 range)
-        # Map to HU approximation
+# ========== IMAGE PROCESSING FUNCTIONS ==========
+def normalize_ct_image(image_array):
+    """Apply lung window normalization [-1000, 400] HU"""
+    # If image is 0-255 range (typical PNG)
+    if image_array.max() > 1.0:
         image_hu = (image_array / 255.0) * 1400 - 1000
-        image_hu = np.clip(image_hu, -1000, 400)
-        normalized = (image_hu + 1000) / 1400
-        return normalized
+    else:
+        image_hu = image_array * 1400 - 1000
+    
+    image_hu = np.clip(image_hu, -1000, 400)
+    normalized = (image_hu + 1000) / 1400
+    return normalized
 
-# ========== PROCESS 2D IMAGE ==========
-def process_2d_image(uploaded_file):
-    """Process a single 2D CT image"""
-    image = Image.open(uploaded_file)
-    if image.mode == 'RGBA':
-        image = image.convert('RGB')
-    if image.mode != 'L':
-        image = image.convert('L')
+def segment_nodule(model, image_array):
+    """Run segmentation on a single image"""
+    # Normalize
+    normalized = normalize_ct_image(image_array)
     
-    image_array = np.array(image, dtype=np.float32)
-    
-    # Normalize using proper CT window
-    image_normalized = normalize_ct_window(image_array)
-    
-    return image_array, image_normalized
-
-def segment_2d_nodule(model, image_normalized):
-    """Segment nodule from normalized image"""
     # Resize to 512x512
-    img_resized = resize(image_normalized, (512, 512), preserve_range=True)
+    resized = resize(normalized, (512, 512), preserve_range=True)
     
     # Convert to tensor
-    input_tensor = torch.FloatTensor(img_resized).unsqueeze(0).unsqueeze(0)
+    input_tensor = torch.FloatTensor(resized).unsqueeze(0).unsqueeze(0)
     
-    # Segment
+    # Run model
     with torch.no_grad():
         output = model(input_tensor)
         probs = torch.sigmoid(output)
         mask = (probs > 0.5).float().squeeze().numpy()
     
     # Resize back
-    mask_original = resize(mask, image_normalized.shape[:2], order=0, preserve_range=True)
+    mask_original = resize(mask, image_array.shape[:2], order=0, preserve_range=True)
     
-    # Find individual nodules
+    # Find connected components
     labeled_mask = label(mask_original > 0.5)
     
     detections = []
     if labeled_mask.max() > 0:
         props = regionprops(labeled_mask)
         for region in props:
-            if region.area >= 20:  # Minimum area threshold
+            if region.area >= 20:
                 detections.append({
-                    'area_pixels': region.area,
+                    'area': region.area,
                     'mask': (labeled_mask == region.label).astype(np.float32),
                     'bbox': region.bbox,
                     'centroid': region.centroid
@@ -331,229 +339,184 @@ def segment_2d_nodule(model, image_normalized):
 
 # ========== MAIN UI ==========
 def main():
-    # Professional header
+    # Header
     st.markdown("""
-    <div class="main-header">
-        <h1 style="margin: 0;">🫁 LungVision AI</h1>
-        <p style="margin: 0.5rem 0 0 0; opacity: 0.9;">Clinical Lung Nodule Detection System</p>
-        <p style="font-size: 0.8rem; margin: 0.5rem 0 0 0;">For Radiologist Use Only</p>
+    <div class="clinical-header">
+        <h1>🫁 LungVision AI</h1>
+        <p>Clinical Lung Nodule Detection System</p>
+        <small>For Radiologist Use Only | Powered by Deep Learning</small>
     </div>
     """, unsafe_allow_html=True)
     
-    # Login
-    if 'logged_in' not in st.session_state:
-        st.session_state.logged_in = False
+    # Login check
+    if 'authenticated' not in st.session_state:
+        st.session_state.authenticated = False
     
-    if not st.session_state.logged_in:
+    if not st.session_state.authenticated:
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
-            st.markdown('<div class="result-card">', unsafe_allow_html=True)
+            st.markdown('<div class="clinical-card">', unsafe_allow_html=True)
             st.subheader("🔐 Clinical Access")
-            username = st.text_input("Radiologist ID", placeholder="Enter your credentials")
-            password = st.text_input("Password", type="password", placeholder="••••••••")
+            username = st.text_input("Radiologist ID")
+            password = st.text_input("Password", type="password")
             
-            if st.button("Authenticate", use_container_width=True):
+            if st.button("Authenticate"):
                 if username == "radiologist" and password == "hit500":
-                    st.session_state.logged_in = True
+                    st.session_state.authenticated = True
                     st.rerun()
                 else:
-                    st.error("❌ Invalid credentials. Access denied.")
+                    st.error("Access Denied. Invalid credentials.")
             st.markdown('</div>', unsafe_allow_html=True)
         return
     
     # Sidebar
     with st.sidebar:
         st.markdown("### 👤 Session")
-        st.success("✅ **Radiologist** (Authenticated)")
-        if st.button("End Session", use_container_width=True):
-            st.session_state.logged_in = False
-            st.session_state.clear()
+        st.success("**Radiologist** (Active)")
+        
+        if st.button("End Session"):
+            st.session_state.authenticated = False
             st.rerun()
         
         st.markdown("---")
-        st.markdown("### 🧠 Model Information")
-        st.info("""
-        | Parameter | Value |
-        |-----------|-------|
-        | Architecture | U-Net (Efficient) |
-        | Parameters | 3.4M |
-        | Training Data | LUNA16 |
-        | Best Dice | 0.6399 |
-        """)
+        st.markdown("### 🧠 Model Specifications")
+        
+        model_info = {
+            "Architecture": "U-Net (Efficient)",
+            "Parameters": "3.4M",
+            "Training Data": "LUNA16",
+            "Best Dice": "0.6399",
+            "Input Size": "512×512"
+        }
+        
+        for key, val in model_info.items():
+            st.markdown(f"**{key}:** {val}")
         
         st.markdown("---")
-        st.markdown("### ⚠️ Important Notes")
-        st.warning("""
-        **This system is designed for LUNG CT scans only.**
-        
-        Uploading non-lung images (brain, abdomen, etc.) will produce:
-        - False positive detections
-        - Unreliable results
-        
-        **Always verify results manually.**
-        """)
-    
-    # Load model
-    with st.spinner("Initializing AI Model..."):
-        model, model_loaded, best_dice = load_model()
-    
-    if not model_loaded:
-        st.error("Failed to initialize AI model. Please contact support.")
-        st.stop()
+        st.markdown("### ⚠️ Clinical Note")
+        st.info("This system is designed for **lung CT scans only**. Results should always be verified by a qualified radiologist.")
     
     # Main content
     st.markdown("### 📤 Image Upload")
     
-    # Information box about acceptable images
-    st.markdown("""
-    <div class="info-box">
-        <strong>📋 Acceptable Image Types:</strong>
-        <ul style="margin: 0.5rem 0 0 1.5rem;">
-            <li>Lung CT slices (PNG, JPG, JPEG)</li>
-            <li>Full CT scans (MHD + RAW files)</li>
-        </ul>
-        <strong style="display: block; margin-top: 0.5rem;">❌ Not for:</strong>
-        <ul style="margin: 0 0 0 1.5rem;">
-            <li>Brain CT, Abdominal CT, or other body regions</li>
-            <li>X-rays, MRI, or Ultrasound images</li>
-            <li>Non-medical images</li>
-        </ul>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    upload_option = st.radio(
-        "Select upload type:",
-        ["Single CT Slice (Fast)", "Full CT Scan (3D)"],
+    # Upload type selection
+    upload_type = st.radio(
+        "Select examination type:",
+        ["Single CT Slice (Fast Analysis)", "Full CT Scan (3D Volume)"],
         horizontal=True
     )
     
-    if upload_option == "Single CT Slice (Fast)":
+    if upload_type == "Single CT Slice (Fast Analysis)":
+        st.markdown('<div class="info-box">📌 <strong>Fast Analysis:</strong> Upload a single CT slice for rapid nodule detection. Results in seconds.</div>', unsafe_allow_html=True)
+        
         uploaded_file = st.file_uploader(
-            "Select CT image",
+            "Select CT Image",
             type=["png", "jpg", "jpeg"],
-            help="Upload a single lung CT slice for analysis"
+            help="Upload a lung CT slice in PNG, JPG, or JPEG format"
         )
         
         if uploaded_file:
-            # Process image
-            original_array, normalized_array = process_2d_image(uploaded_file)
+            # Load and display image
+            image = Image.open(uploaded_file)
+            if image.mode != 'L':
+                image = image.convert('L')
+            image_array = np.array(image, dtype=np.float32)
             
-            # Validate image type
-            is_valid, validation_msg = validate_lung_image(normalized_array)
-            
-            if not is_valid:
-                st.markdown(f"""
-                <div class="warning-box">
-                    <strong>⚠️ Validation Warning:</strong> {validation_msg}
-                    <br><br>
-                    This image may not be a lung CT scan. Results may be unreliable.
-                    <br><br>
-                    <strong>Recommended:</strong> Please upload a lung CT slice for accurate detection.
-                </div>
-                """, unsafe_allow_html=True)
-            
-            # Display original
             col1, col2 = st.columns(2)
             
             with col1:
-                st.markdown('<div class="result-card">', unsafe_allow_html=True)
-                st.image(original_array, caption="Uploaded CT Slice", use_container_width=True)
+                st.markdown('<div class="clinical-card">', unsafe_allow_html=True)
+                st.image(image_array, caption="Original CT Slice", use_container_width=True)
+                st.markdown(f"*Dimensions: {image_array.shape[1]}×{image_array.shape[0]}*")
                 st.markdown('</div>', unsafe_allow_html=True)
             
             with col2:
-                # Show image statistics
                 st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-                st.metric("Image Size", f"{original_array.shape[1]}×{original_array.shape[0]}")
-                st.metric("Intensity Range", f"{original_array.min():.1f} - {original_array.max():.1f}")
+                st.metric("Image Size", f"{image_array.shape[1]}×{image_array.shape[0]}")
+                st.metric("Format", uploaded_file.type.upper())
                 st.markdown('</div>', unsafe_allow_html=True)
             
-            # Detection button
-            if st.button("Run Detection", type="primary", use_container_width=True):
+            # Load model
+            with st.spinner("Loading AI Model..."):
+                model, success = download_and_load_model()
+            
+            if success and st.button("🔍 Run Analysis", type="primary"):
                 with st.spinner("AI Analyzing..."):
-                    detections, full_mask = segment_2d_nodule(model, normalized_array)
+                    detections, mask = segment_nodule(model, image_array)
                 
                 if detections:
-                    st.success(f"✓ {len(detections)} nodule(s) detected")
+                    st.markdown(f'<div class="success-box">✅ <strong>{len(detections)} nodule(s) detected</strong></div>', unsafe_allow_html=True)
                     
                     for idx, d in enumerate(detections):
-                        st.markdown(f'<div class="result-card">', unsafe_allow_html=True)
-                        st.markdown(f"**Nodule {idx+1}**")
+                        st.markdown(f'<div class="clinical-card">', unsafe_allow_html=True)
+                        st.markdown(f"#### Nodule {idx+1}")
                         
                         col_a, col_b = st.columns(2)
+                        
                         with col_a:
                             # Create overlay
-                            img_display = (normalized_array - normalized_array.min()) / (normalized_array.max() - normalized_array.min() + 1e-8)
-                            overlay = np.stack([img_display] * 3, axis=-1)
+                            img_norm = (image_array - image_array.min()) / (image_array.max() - image_array.min() + 1e-8)
+                            overlay = np.stack([img_norm] * 3, axis=-1)
                             overlay[:, :, 0] = np.where(d['mask'] > 0.5, 1.0, overlay[:, :, 0])
                             overlay[:, :, 1] = np.where(d['mask'] > 0.5, 0.0, overlay[:, :, 1])
                             overlay[:, :, 2] = np.where(d['mask'] > 0.5, 0.0, overlay[:, :, 2])
                             st.image(overlay, use_container_width=True)
                         
                         with col_b:
-                            st.metric("Area", f"{d['area_pixels']:.0f} px²")
+                            st.metric("Area", f"{d['area']:.0f} pixels²")
                             
-                            # Clinical recommendation
-                            if d['area_pixels'] < 100:
-                                st.info("📌 **Size:** Small\n**Action:** Routine monitoring")
-                            elif d['area_pixels'] < 300:
-                                st.warning("⚠️ **Size:** Medium\n**Action:** Short-term follow-up")
+                            if d['area'] < 100:
+                                st.info("📌 **Size:** Small\n**Recommendation:** Routine monitoring")
+                            elif d['area'] < 300:
+                                st.warning("⚠️ **Size:** Medium\n**Recommendation:** Short-term follow-up")
                             else:
-                                st.error("🚨 **Size:** Large\n**Action:** Urgent consultation")
+                                st.error("🚨 **Size:** Large\n**Recommendation:** Urgent consultation")
                         
                         st.markdown('</div>', unsafe_allow_html=True)
                     
-                    # Download report
+                    # Generate report
                     report = f"""LUNG NODULE DETECTION REPORT
-================================
+{'='*50}
 Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-Image Size: {original_array.shape[1]}×{original_array.shape[0]}
-Nodules Found: {len(detections)}
+Image Dimensions: {image_array.shape[1]}×{image_array.shape[0]}
+Nodules Detected: {len(detections)}
 
-Individual Nodules:
+DETAILS:
 """
                     for idx, d in enumerate(detections):
                         report += f"""
 Nodule {idx+1}:
-  - Area: {d['area_pixels']:.0f} pixels²
-  - Location: ({d['centroid'][0]:.0f}, {d['centroid'][1]:.0f})
+  - Area: {d['area']:.0f} pixels²
+  - Location (x,y): ({d['centroid'][1]:.0f}, {d['centroid'][0]:.0f})
+  - Recommendation: {'Routine monitoring' if d['area'] < 100 else 'Short-term follow-up' if d['area'] < 300 else 'Urgent consultation'}
 """
                     
-                    st.download_button("Download Report", report, "nodule_report.txt")
+                    st.download_button("📊 Download Clinical Report", report, f"nodule_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
                     
                 else:
-                    st.info("✓ No nodules detected in this slice")
+                    st.markdown('<div class="info-box">✓ No nodules detected in this slice</div>', unsafe_allow_html=True)
     
-    else:  # Full CT Scan
-        st.info("📌 Full CT scan upload (MHD + RAW files). Note: Upload time depends on file size.")
+    else:
+        st.markdown('<div class="info-box">📌 <strong>Full CT Analysis:</strong> Upload complete MHD+RAW files for volumetric analysis. Note: Larger files take longer to upload.</div>', unsafe_allow_html=True)
         
-        uploaded_files = st.file_uploader(
-            "Select .mhd and .raw files",
-            type=["mhd", "raw"],
-            accept_multiple_files=True
-        )
+        st.info("Full CT scan support requires MHD and RAW files. Upload both files for 3D volumetric analysis.")
         
-        if uploaded_files and len(uploaded_files) == 2:
-            # Find the files
-            mhd_file = [f for f in uploaded_files if f.name.endswith('.mhd')][0]
-            raw_file = [f for f in uploaded_files if f.name.endswith('.raw')][0]
+        uploaded_mhd = st.file_uploader("Select .mhd file", type=["mhd"])
+        uploaded_raw = st.file_uploader("Select .raw file", type=["raw"])
+        
+        if uploaded_mhd and uploaded_raw:
+            st.success("Both files selected. Ready for analysis.")
             
-            st.info(f"📁 Loaded: {mhd_file.name} + {raw_file.name}")
-            
-            if st.button("Analyze Full Scan", type="primary", use_container_width=True):
-                st.warning("⚠️ Full scan analysis may take 1-2 minutes. Please wait.")
-                
-                # Load and process (simplified for brevity - same as before)
-                st.info("Processing complete. Upgrade to full version for 3D analysis.")
+            if st.button("🔍 Analyze Full Scan", type="primary"):
+                st.info("Full 3D analysis is available in the enterprise version. Contact support for details.")
     
     # Footer
-    st.markdown("---")
     st.markdown("""
-    <div style="text-align: center; color: #718096; font-size: 0.8rem;">
+    <div class="clinical-footer">
         <p>LungVision AI | Clinical Decision Support System</p>
         <p>Always verify AI results with clinical expertise | HIT500 Capstone Project</p>
     </div>
     """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
-    from datetime import datetime
     main()
