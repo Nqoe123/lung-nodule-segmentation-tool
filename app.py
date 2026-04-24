@@ -15,6 +15,7 @@ from collections import OrderedDict
 from PIL import Image
 import warnings
 from datetime import datetime
+import zipfile
 
 warnings.filterwarnings('ignore')
 
@@ -152,22 +153,6 @@ st.markdown("""
         background: linear-gradient(90deg, transparent, #cbd5e0, transparent);
         margin: 1.5rem 0;
     }
-    
-    /* Table styling */
-    table {
-        width: 100%;
-        border-collapse: collapse;
-    }
-    th {
-        background-color: #f7f9fc;
-        padding: 8px;
-        text-align: left;
-        border-bottom: 2px solid #e2e8f0;
-    }
-    td {
-        padding: 8px;
-        border-bottom: 1px solid #e2e8f0;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -185,22 +170,28 @@ def download_and_load_model():
                 url = f"https://drive.google.com/uc?id={GOOGLE_DRIVE_FILE_ID}"
                 gdown.download(url, MODEL_FILENAME, quiet=True)
         
-        # Load model
-        model = UNet()
+        # Load model - using the same architecture as training
+        model = MemoryEfficientUNet(n_channels=1, n_classes=1)
         checkpoint = torch.load(MODEL_FILENAME, map_location='cpu')
         
-        if 'model_state_dict' in checkpoint:
-            state_dict = checkpoint['model_state_dict']
+        # Handle different checkpoint formats
+        if isinstance(checkpoint, dict):
+            if 'model_state_dict' in checkpoint:
+                state_dict = checkpoint['model_state_dict']
+            else:
+                state_dict = checkpoint
         else:
-            state_dict = checkpoint
+            state_dict = checkpoint.state_dict() if hasattr(checkpoint, 'state_dict') else checkpoint
         
         # Remove DataParallel wrapper if present
-        if 'module.' in list(state_dict.keys())[0]:
-            new_state_dict = OrderedDict()
-            for k, v in state_dict.items():
-                name = k[7:]
-                new_state_dict[name] = v
-            state_dict = new_state_dict
+        if isinstance(state_dict, dict) and len(state_dict) > 0:
+            first_key = list(state_dict.keys())[0]
+            if first_key.startswith('module.'):
+                new_state_dict = OrderedDict()
+                for k, v in state_dict.items():
+                    name = k[7:]  # remove 'module.'
+                    new_state_dict[name] = v
+                state_dict = new_state_dict
         
         model.load_state_dict(state_dict)
         model.eval()
@@ -209,12 +200,13 @@ def download_and_load_model():
         
     except Exception as e:
         st.error(f"Model Error: {str(e)}")
+        st.error("Make sure the model file is the correct format from your training.")
         return None, False
 
-# ========== U-NET ARCHITECTURE ==========
+# ========== MEMORY EFFICIENT U-NET (MATCHING YOUR TRAINING) ==========
 class DoubleConv(nn.Module):
     def __init__(self, in_channels, out_channels):
-        super().__init__()
+        super(DoubleConv, self).__init__()
         self.double_conv = nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
             nn.BatchNorm2d(out_channels),
@@ -223,22 +215,24 @@ class DoubleConv(nn.Module):
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True)
         )
+    
     def forward(self, x):
         return self.double_conv(x)
 
 class Down(nn.Module):
     def __init__(self, in_channels, out_channels):
-        super().__init__()
+        super(Down, self).__init__()
         self.maxpool_conv = nn.Sequential(
             nn.MaxPool2d(2),
             DoubleConv(in_channels, out_channels)
         )
+    
     def forward(self, x):
         return self.maxpool_conv(x)
 
 class Up(nn.Module):
     def __init__(self, in_channels, out_channels, bilinear=True):
-        super().__init__()
+        super(Up, self).__init__()
         if bilinear:
             self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
         else:
@@ -255,25 +249,30 @@ class Up(nn.Module):
 
 class OutConv(nn.Module):
     def __init__(self, in_channels, out_channels):
-        super().__init__()
+        super(OutConv, self).__init__()
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+    
     def forward(self, x):
         return self.conv(x)
 
-class UNet(nn.Module):
+class MemoryEfficientUNet(nn.Module):
     def __init__(self, n_channels=1, n_classes=1, bilinear=True):
-        super().__init__()
-        self.inc = DoubleConv(n_channels, 32)
-        self.down1 = Down(32, 64)
-        self.down2 = Down(64, 128)
-        self.down3 = Down(128, 256)
+        super(MemoryEfficientUNet, self).__init__()
+        self.n_channels = n_channels
+        self.n_classes = n_classes
+        self.bilinear = bilinear
+
+        self.inc = DoubleConv(n_channels, 64)
+        self.down1 = Down(64, 128)
+        self.down2 = Down(128, 256)
+        self.down3 = Down(256, 512)
         factor = 2 if bilinear else 1
-        self.down4 = Down(256, 512 // factor)
-        self.up1 = Up(512, 256 // factor, bilinear)
-        self.up2 = Up(256, 128 // factor, bilinear)
-        self.up3 = Up(128, 64 // factor, bilinear)
-        self.up4 = Up(64, 32, bilinear)
-        self.outc = OutConv(32, n_classes)
+        self.down4 = Down(512, 1024 // factor)
+        self.up1 = Up(1024, 512 // factor, bilinear)
+        self.up2 = Up(512, 256 // factor, bilinear)
+        self.up3 = Up(256, 128 // factor, bilinear)
+        self.up4 = Up(128, 64, bilinear)
+        self.outc = OutConv(64, n_classes)
     
     def forward(self, x):
         x1 = self.inc(x)
@@ -285,7 +284,8 @@ class UNet(nn.Module):
         x = self.up2(x, x3)
         x = self.up3(x, x2)
         x = self.up4(x, x1)
-        return self.outc(x)
+        logits = self.outc(x)
+        return logits
 
 # ========== IMAGE PROCESSING FUNCTIONS ==========
 def normalize_ct_image(image_array):
@@ -305,7 +305,7 @@ def segment_nodule(model, image_array):
     # Normalize
     normalized = normalize_ct_image(image_array)
     
-    # Resize to 512x512
+    # Resize to 512x512 (model expects 512x512)
     resized = resize(normalized, (512, 512), preserve_range=True)
     
     # Convert to tensor
@@ -317,7 +317,7 @@ def segment_nodule(model, image_array):
         probs = torch.sigmoid(output)
         mask = (probs > 0.5).float().squeeze().numpy()
     
-    # Resize back
+    # Resize back to original dimensions
     mask_original = resize(mask, image_array.shape[:2], order=0, preserve_range=True)
     
     # Find connected components
@@ -327,15 +327,55 @@ def segment_nodule(model, image_array):
     if labeled_mask.max() > 0:
         props = regionprops(labeled_mask)
         for region in props:
-            if region.area >= 20:
+            if region.area >= 20:  # Minimum nodule size
                 detections.append({
                     'area': region.area,
                     'mask': (labeled_mask == region.label).astype(np.float32),
                     'bbox': region.bbox,
-                    'centroid': region.centroid
+                    'centroid': region.centroid,
+                    'min_intensity': region.min_intensity if hasattr(region, 'min_intensity') else None
                 })
     
     return detections, mask_original
+
+def load_mhd_raw(mhd_bytes, raw_bytes):
+    """Load and parse MHD + RAW files"""
+    with tempfile.NamedTemporaryFile(suffix='.mhd', delete=False) as mhd_file:
+        mhd_file.write(mhd_bytes)
+        mhd_path = mhd_file.name
+    
+    with tempfile.NamedTemporaryFile(suffix='.raw', delete=False) as raw_file:
+        raw_file.write(raw_bytes)
+        raw_path = raw_file.name
+    
+    try:
+        # Update MHD file to point to correct RAW path
+        with open(mhd_path, 'r') as f:
+            content = f.read()
+        
+        # Replace the RAW filename in MHD
+        import re
+        content = re.sub(r'ElementDataFile = .*\.raw', f'ElementDataFile = {raw_path}', content)
+        
+        with open(mhd_path, 'w') as f:
+            f.write(content)
+        
+        # Load with SimpleITK
+        img = sitk.ReadImage(mhd_path)
+        array = sitk.GetArrayFromImage(img)
+        
+        return array, img
+        
+    except Exception as e:
+        st.error(f"Error loading MHD/RAW: {e}")
+        return None, None
+    finally:
+        # Clean up temp files
+        try:
+            os.unlink(mhd_path)
+            os.unlink(raw_path)
+        except:
+            pass
 
 # ========== MAIN UI ==========
 def main():
@@ -382,10 +422,10 @@ def main():
         st.markdown("### 🧠 Model Specifications")
         
         model_info = {
-            "Architecture": "U-Net (Efficient)",
-            "Parameters": "3.4M",
+            "Architecture": "Memory Efficient U-Net",
+            "Initial Channels": "64",
             "Training Data": "LUNA16",
-            "Best Dice": "0.6399",
+            "Best Dice": "0.70",
             "Input Size": "512×512"
         }
         
@@ -411,8 +451,8 @@ def main():
         
         uploaded_file = st.file_uploader(
             "Select CT Image",
-            type=["png", "jpg", "jpeg"],
-            help="Upload a lung CT slice in PNG, JPG, or JPEG format"
+            type=["png", "jpg", "jpeg", "dcm"],
+            help="Upload a lung CT slice in PNG, JPG, JPEG, or DICOM format"
         )
         
         if uploaded_file:
@@ -471,6 +511,8 @@ def main():
                                 st.warning("⚠️ **Size:** Medium\n**Recommendation:** Short-term follow-up")
                             else:
                                 st.error("🚨 **Size:** Large\n**Recommendation:** Urgent consultation")
+                            
+                            st.metric("Centroid (x,y)", f"({d['centroid'][1]:.0f}, {d['centroid'][0]:.0f})")
                         
                         st.markdown('</div>', unsafe_allow_html=True)
                     
@@ -497,18 +539,99 @@ Nodule {idx+1}:
                     st.markdown('<div class="info-box">✓ No nodules detected in this slice</div>', unsafe_allow_html=True)
     
     else:
-        st.markdown('<div class="info-box">📌 <strong>Full CT Analysis:</strong> Upload complete MHD+RAW files for volumetric analysis. Note: Larger files take longer to upload.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="info-box">📌 <strong>Full CT Analysis:</strong> Upload a ZIP file containing both MHD and RAW files for volumetric analysis.</div>', unsafe_allow_html=True)
         
-        st.info("Full CT scan support requires MHD and RAW files. Upload both files for 3D volumetric analysis.")
+        # Single file upload for ZIP containing both MHD and RAW
+        uploaded_zip = st.file_uploader(
+            "Select ZIP file containing .mhd and .raw files",
+            type=["zip"],
+            help="Upload a ZIP archive that contains both the .mhd and .raw files together"
+        )
         
-        uploaded_mhd = st.file_uploader("Select .mhd file", type=["mhd"])
-        uploaded_raw = st.file_uploader("Select .raw file", type=["raw"])
-        
-        if uploaded_mhd and uploaded_raw:
-            st.success("Both files selected. Ready for analysis.")
-            
-            if st.button("🔍 Analyze Full Scan", type="primary"):
-                st.info("Full 3D analysis is available in the enterprise version. Contact support for details.")
+        if uploaded_zip:
+            # Extract ZIP
+            with tempfile.TemporaryDirectory() as tmpdir:
+                zip_path = os.path.join(tmpdir, "upload.zip")
+                with open(zip_path, "wb") as f:
+                    f.write(uploaded_zip.getbuffer())
+                
+                # Extract
+                import zipfile
+                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                    zip_ref.extractall(tmpdir)
+                
+                # Find MHD and RAW files
+                mhd_file = None
+                raw_file = None
+                
+                for file in os.listdir(tmpdir):
+                    if file.endswith('.mhd'):
+                        mhd_file = os.path.join(tmpdir, file)
+                    elif file.endswith('.raw'):
+                        raw_file = os.path.join(tmpdir, file)
+                
+                if mhd_file and raw_file:
+                    st.success(f"Found: {os.path.basename(mhd_file)} and {os.path.basename(raw_file)}")
+                    
+                    # Load and display info
+                    img = sitk.ReadImage(mhd_file)
+                    array = sitk.GetArrayFromImage(img)
+                    
+                    st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+                    st.metric("Volume Dimensions", f"{array.shape[0]} × {array.shape[1]} × {array.shape[2]}")
+                    st.metric("Spacing", f"{img.GetSpacing()[0]:.2f}mm")
+                    st.markdown('</div>', unsafe_allow_html=True)
+                    
+                    # Display first and last slice for preview
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.image(array[array.shape[0]//2], caption="Middle Slice Preview", use_container_width=True)
+                    
+                    if st.button("🔍 Analyze Full Volume", type="primary"):
+                        st.info("Full 3D volumetric analysis processing...")
+                        
+                        # Process each slice
+                        detections_all = []
+                        model, success = download_and_load_model()
+                        
+                        if success:
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
+                            
+                            for i in range(array.shape[0]):
+                                status_text.text(f"Processing slice {i+1}/{array.shape[0]}")
+                                slice_img = array[i]
+                                
+                                # Normalize
+                                slice_normalized = (slice_img - slice_img.min()) / (slice_img.max() - slice_img.min() + 1e-8)
+                                
+                                # Segment
+                                detections, _ = segment_nodule(model, slice_normalized)
+                                
+                                if detections:
+                                    for d in detections:
+                                        detections_all.append({
+                                            'slice': i,
+                                            'area': d['area'],
+                                            'centroid': d['centroid']
+                                        })
+                                
+                                progress_bar.progress((i + 1) / array.shape[0])
+                            
+                            status_text.text("Analysis complete!")
+                            
+                            # Show results
+                            if detections_all:
+                                st.markdown(f'<div class="success-box">✅ <strong>{len(detections_all)} nodule(s) detected across {array.shape[0]} slices</strong></div>', unsafe_allow_html=True)
+                                
+                                # Group by slice
+                                import pandas as pd
+                                df = pd.DataFrame(detections_all)
+                                st.dataframe(df, use_container_width=True)
+                            else:
+                                st.markdown('<div class="info-box">✓ No nodules detected in this volume</div>', unsafe_allow_html=True)
+                else:
+                    st.error("ZIP file must contain both .mhd and .raw files")
     
     # Footer
     st.markdown("""
