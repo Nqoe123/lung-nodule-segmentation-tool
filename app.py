@@ -174,16 +174,15 @@ def load_model():
         model.load_state_dict(new_state_dict)
         model.eval()
         
-        st.success("✅ Model loaded (Dice: 0.74)")
         return model
         
     except Exception as e:
         st.error(f"Model error: {str(e)}")
         return None
 
-# ========== AUTOMATIC SEGMENTATION ==========
+# ========== SEGMENTATION ==========
 def segment_nodule(model, image_array):
-    """Fully automatic segmentation - no settings needed"""
+    """Run segmentation on a single image"""
     try:
         original_shape = image_array.shape
         
@@ -200,7 +199,6 @@ def segment_nodule(model, image_array):
         with torch.no_grad():
             output = model(input_tensor)
             probs = torch.sigmoid(output)
-            # Fixed threshold at 0.5 for good model
             mask = (probs > 0.5).float().squeeze().numpy()
         
         # Resize mask back
@@ -211,7 +209,7 @@ def segment_nodule(model, image_array):
         nodules = []
         
         for region in regionprops(labeled):
-            if region.area >= 20:  # Minimum nodule size
+            if region.area >= 20:
                 nodules.append({
                     'id': len(nodules) + 1,
                     'area_pixels': region.area,
@@ -224,29 +222,53 @@ def segment_nodule(model, image_array):
         return nodules, mask_resized
     
     except Exception as e:
-        st.error(f"Segmentation error: {str(e)}")
         return [], None
 
-def load_volume(zip_file):
-    """Load CT volume from ZIP"""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        zip_path = os.path.join(tmpdir, "upload.zip")
+def load_volume_fast(zip_file):
+    """Load CT volume from ZIP with progress"""
+    with st.spinner("Extracting volume..."):
+        temp_dir = tempfile.mkdtemp()
+        zip_path = os.path.join(temp_dir, "upload.zip")
+        
         with open(zip_path, "wb") as f:
             f.write(zip_file.getbuffer())
         
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall(tmpdir)
+            zip_ref.extractall(temp_dir)
         
-        mhd_file = next((os.path.join(tmpdir, f) for f in os.listdir(tmpdir) if f.endswith('.mhd')), None)
-        raw_file = next((os.path.join(tmpdir, f) for f in os.listdir(tmpdir) if f.endswith('.raw')), None)
+        mhd_file = None
+        raw_file = None
+        
+        for file in os.listdir(temp_dir):
+            if file.endswith('.mhd'):
+                mhd_file = os.path.join(temp_dir, file)
+            elif file.endswith('.raw'):
+                raw_file = os.path.join(temp_dir, file)
         
         if mhd_file and raw_file:
             img = sitk.ReadImage(mhd_file)
             volume = sitk.GetArrayFromImage(img)
             spacing = img.GetSpacing()
-            return volume, spacing
+            return volume, spacing, temp_dir
     
-    return None, None
+    return None, None, None
+
+def create_overlay(image_array, nodules):
+    """Create RGB overlay with red highlights for nodules"""
+    # Normalize image for display
+    img_norm = (image_array - image_array.min()) / (image_array.max() - image_array.min() + 1e-8)
+    
+    # Create RGB overlay
+    overlay = np.stack([img_norm] * 3, axis=-1)
+    
+    # Highlight each nodule in red
+    for nodule in nodules:
+        mask_bool = nodule['mask'] > 0.5
+        overlay[mask_bool, 0] = 1.0  # Red channel
+        overlay[mask_bool, 1] = 0.0  # Green channel
+        overlay[mask_bool, 2] = 0.0  # Blue channel
+    
+    return overlay
 
 # ========== MAIN APP ==========
 def main():
@@ -303,37 +325,26 @@ def main():
             image = Image.open(uploaded_file).convert('L')
             image_array = np.array(image, dtype=np.float32)
             
-            # Show image
-            col1, col2 = st.columns(2)
-            with col1:
-                fig, ax = plt.subplots(figsize=(6, 6))
-                ax.imshow(image_array, cmap='gray')
-                ax.set_title("Original CT Slice")
-                ax.axis('off')
-                st.pyplot(fig)
+            # Show original
+            fig, ax = plt.subplots(figsize=(6, 6))
+            ax.imshow(image_array, cmap='gray')
+            ax.set_title("Original CT Slice")
+            ax.axis('off')
+            st.pyplot(fig)
             
-            # ONE BUTTON - fully automatic
             if st.button("🔍 Detect Nodules", type="primary"):
                 with st.spinner("Analyzing..."):
                     nodules, mask = segment_nodule(model, image_array)
                 
                 if nodules:
-                    # Show result with overlay
-                    with col2:
-                        # Create overlay
-                        img_norm = (image_array - image_array.min()) / (image_array.max() - image_array.min() + 1e-8)
-                        overlay = np.stack([img_norm] * 3, axis=-1)
-                        for n in nodules:
-                            mask_bool = n['mask'] > 0.5
-                            overlay[mask_bool, 0] = 1.0  # Red
-                            overlay[mask_bool, 1] = 0.0
-                            overlay[mask_bool, 2] = 0.0
-                        
-                        fig2, ax2 = plt.subplots(figsize=(6, 6))
-                        ax2.imshow(overlay)
-                        ax2.set_title(f"✅ {len(nodules)} Nodule(s) Detected")
-                        ax2.axis('off')
-                        st.pyplot(fig2)
+                    # Create and show overlay
+                    overlay = create_overlay(image_array, nodules)
+                    
+                    fig2, ax2 = plt.subplots(figsize=(6, 6))
+                    ax2.imshow(overlay)
+                    ax2.set_title(f"✅ {len(nodules)} Nodule(s) Detected")
+                    ax2.axis('off')
+                    st.pyplot(fig2)
                     
                     # Results table
                     st.markdown(f'<div class="success-box">✅ <strong>{len(nodules)} Nodule(s) Detected</strong></div>', unsafe_allow_html=True)
@@ -349,7 +360,6 @@ def main():
                     st.dataframe(pd.DataFrame(results), use_container_width=True)
                     
                     # Recommendations
-                    st.markdown("### 🩺 Recommendations")
                     for n in nodules:
                         if n['area_pixels'] < 100:
                             st.markdown(f'<div class="info-box">📌 Nodule {n["id"]}: Small - Routine follow-up in 12 months</div>', unsafe_allow_html=True)
@@ -357,74 +367,142 @@ def main():
                             st.markdown(f'<div class="warning-box">⚠️ Nodule {n["id"]}: Medium - Follow-up in 6 months</div>', unsafe_allow_html=True)
                         else:
                             st.markdown(f'<div class="warning-box">🚨 Nodule {n["id"]}: Large - Urgent consultation</div>', unsafe_allow_html=True)
-                    
-                    # Download report
-                    report = f"""LUNG NODULE REPORT
-Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-Nodules: {len(nodules)}
-
-"""
-                    for n in nodules:
-                        report += f"Nodule {n['id']}: {n['area_pixels']:.0f} px² at ({n['centroid_x']:.0f}, {n['centroid_y']:.0f})\n"
-                    
-                    st.download_button("📄 Download Report", report, f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
-                    
                 else:
-                    st.markdown('<div class="info-box">✓ No nodules detected in this slice</div>', unsafe_allow_html=True)
-                    
-                    # Debug info
-                    with st.expander("Debug Info"):
-                        st.write(f"Image shape: {image_array.shape}")
-                        st.write(f"Image range: [{image_array.min():.2f}, {image_array.max():.2f}]")
-                        if mask is not None:
-                            st.write(f"Max probability: {mask.max():.4f}")
-                            fig3, ax3 = plt.subplots(figsize=(4, 4))
-                            ax3.imshow(mask, cmap='hot')
-                            ax3.set_title("Model Activation Map")
-                            ax3.axis('off')
-                            st.pyplot(fig3)
+                    st.info("✓ No nodules detected in this slice")
     
     else:  # Full CT Volume
-        uploaded_zip = st.file_uploader("Choose CT volume (ZIP with .mhd/.raw)", type=["zip"])
+        st.info("📦 Upload a ZIP file containing .mhd and .raw files")
+        
+        uploaded_zip = st.file_uploader("Choose CT volume (ZIP)", type=["zip"])
         
         if uploaded_zip:
             if st.button("🔍 Analyze Full Volume", type="primary"):
-                with st.spinner("Loading and analyzing volume..."):
-                    volume, spacing = load_volume(uploaded_zip)
+                # Load volume
+                volume, spacing, temp_dir = load_volume_fast(uploaded_zip)
                 
                 if volume is not None:
-                    st.success(f"Volume: {volume.shape[0]} slices, {volume.shape[1]}×{volume.shape[2]}")
+                    st.success(f"✅ Volume loaded: {volume.shape[0]} slices, {volume.shape[1]}×{volume.shape[2]}")
+                    if spacing:
+                        st.info(f"Pixel spacing: {spacing[0]:.2f} mm")
                     
+                    # Process volume - skip slices without nodules for speed
                     all_nodules = []
-                    progress = st.progress(0)
+                    slices_with_nodules = {}
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    # Show warning if many slices
+                    if volume.shape[0] > 200:
+                        st.warning(f"Processing {volume.shape[0]} slices. This may take a few minutes...")
                     
                     for i in range(volume.shape[0]):
+                        status_text.text(f"Analyzing slice {i+1}/{volume.shape[0]}...")
+                        
+                        # Segment slice
                         nodules, _ = segment_nodule(model, volume[i])
-                        for n in nodules:
-                            if spacing:
-                                diam_mm = n['diameter_pixels'] * spacing[0]
-                                area_mm2 = n['area_pixels'] * (spacing[0] ** 2)
-                            else:
-                                diam_mm = n['diameter_pixels']
-                                area_mm2 = n['area_pixels']
+                        
+                        if nodules:
+                            slices_with_nodules[i] = {
+                                'image': volume[i],
+                                'nodules': nodules
+                            }
                             
-                            all_nodules.append({
-                                'Slice': i,
-                                'Area (px²)': n['area_pixels'],
-                                'Area (mm²)': f"{area_mm2:.1f}" if spacing else "N/A",
-                                'Diameter (mm)': f"{diam_mm:.1f}" if spacing else "N/A"
-                            })
-                        progress.progress((i + 1) / volume.shape[0])
+                            for n in nodules:
+                                if spacing:
+                                    diam_mm = n['diameter_pixels'] * spacing[0]
+                                    area_mm2 = n['area_pixels'] * (spacing[0] ** 2)
+                                else:
+                                    diam_mm = n['diameter_pixels']
+                                    area_mm2 = n['area_pixels']
+                                
+                                all_nodules.append({
+                                    'Slice': i,
+                                    'Area (px²)': n['area_pixels'],
+                                    'Area (mm²)': f"{area_mm2:.1f}",
+                                    'Diameter (mm)': f"{diam_mm:.1f}"
+                                })
+                        
+                        progress_bar.progress((i + 1) / volume.shape[0])
+                    
+                    status_text.text("Analysis complete!")
                     
                     if all_nodules:
-                        st.markdown(f'<div class="success-box">✅ <strong>{len(all_nodules)} Nodules Detected</strong></div>', unsafe_allow_html=True)
+                        st.markdown(f'<div class="success-box">✅ <strong>{len(all_nodules)} Nodule(s) Detected</strong> across {len(slices_with_nodules)} slices</div>', unsafe_allow_html=True)
+                        
+                        # Show overlay for slices with nodules
+                        if slices_with_nodules:
+                            st.markdown("### 🔍 Visual Results")
+                            
+                            # Let user select which slice to view
+                            slice_numbers = sorted(slices_with_nodules.keys())
+                            selected_slice = st.selectbox(
+                                "Select slice to view nodule overlay:",
+                                slice_numbers,
+                                format_func=lambda x: f"Slice {x} ({len(slices_with_nodules[x]['nodules'])} nodules)"
+                            )
+                            
+                            # Display overlay for selected slice
+                            selected_data = slices_with_nodules[selected_slice]
+                            overlay = create_overlay(selected_data['image'], selected_data['nodules'])
+                            
+                            fig, ax = plt.subplots(figsize=(8, 8))
+                            ax.imshow(overlay)
+                            ax.set_title(f"Slice {selected_slice} - {len(selected_data['nodules'])} Nodule(s)")
+                            ax.axis('off')
+                            st.pyplot(fig)
+                            
+                            # Show individual nodule details for this slice
+                            st.markdown(f"**Nodules in Slice {selected_slice}:**")
+                            for n in selected_data['nodules']:
+                                if spacing:
+                                    diam_mm = n['diameter_pixels'] * spacing[0]
+                                    area_mm2 = n['area_pixels'] * (spacing[0] ** 2)
+                                else:
+                                    diam_mm = n['diameter_pixels']
+                                    area_mm2 = n['area_pixels']
+                                
+                                st.markdown(f"- Nodule {n['id']}: {n['area_pixels']:.0f} px² ({area_mm2:.1f} mm²), Diameter: {diam_mm:.1f} mm")
+                        
+                        # Summary table
+                        st.markdown("### 📊 All Detections")
                         df = pd.DataFrame(all_nodules)
                         st.dataframe(df, use_container_width=True)
                         
+                        # Summary statistics
+                        st.markdown("### 📈 Summary")
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Total Nodules", len(all_nodules))
+                        with col2:
+                            areas = [n['Area (px²)'] for n in all_nodules]
+                            st.metric("Average Area", f"{np.mean(areas):.0f} px²")
+                        with col3:
+                            if spacing:
+                                diameters = [float(n['Diameter (mm)']) for n in all_nodules]
+                                st.metric("Largest Nodule", f"{max(diameters):.1f} mm")
+                        
+                        # Recommendations by size
+                        small = [n for n in all_nodules if n['Area (px²)'] < 100]
+                        medium = [n for n in all_nodules if 100 <= n['Area (px²)'] < 300]
+                        large = [n for n in all_nodules if n['Area (px²)'] >= 300]
+                        
+                        if small:
+                            st.markdown(f'<div class="info-box">📌 Small nodules ({len(small)}): Routine follow-up in 12 months</div>', unsafe_allow_html=True)
+                        if medium:
+                            st.markdown(f'<div class="warning-box">⚠️ Medium nodules ({len(medium)}): Follow-up in 6 months</div>', unsafe_allow_html=True)
+                        if large:
+                            st.markdown(f'<div class="warning-box">🚨 Large nodules ({len(large)}): Urgent consultation recommended</div>', unsafe_allow_html=True)
+                        
+                        # Download buttons
                         csv = df.to_csv(index=False)
-                        st.download_button("📊 Download Results", csv, f"volume_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+                        st.download_button("📊 Download Results CSV", csv, f"results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+                        
                     else:
                         st.info("✓ No nodules detected in this volume")
+                    
+                    # Cleanup
+                    import shutil
+                    shutil.rmtree(temp_dir, ignore_errors=True)
                 else:
                     st.error("Could not load volume. Make sure ZIP contains .mhd and .raw files")
     
