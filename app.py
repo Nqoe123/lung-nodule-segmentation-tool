@@ -9,8 +9,9 @@ import os
 import gdown
 from skimage.transform import resize
 from skimage.measure import label, regionprops
-from skimage.filters import threshold_otsu
-from skimage.morphology import area_opening, remove_small_objects
+from skimage.filters import threshold_otsu, sobel
+from skimage.morphology import remove_small_objects, binary_erosion, binary_dilation
+from scipy import ndimage
 import tempfile
 import SimpleITK as sitk
 from collections import OrderedDict
@@ -159,11 +160,102 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ========== LUNG CT VALIDATION FUNCTIONS ==========
+# ========== ROBUST LUNG CT VALIDATION FUNCTIONS ==========
+
+def extract_lung_features(image_array):
+    """Extract feature vector from image for lung CT classification"""
+    features = {}
+    
+    try:
+        # Ensure 2D grayscale
+        if len(image_array.shape) > 2:
+            image_array = image_array[:, :, 0]
+        
+        # Basic statistics
+        features['min'] = float(image_array.min())
+        features['max'] = float(image_array.max())
+        features['mean'] = float(image_array.mean())
+        features['std'] = float(image_array.std())
+        features['skew'] = float(ndimage.measurements.center_of_mass(image_array)[0])  # Simple skew proxy
+        
+        # Percentiles for intensity distribution
+        features['p5'] = float(np.percentile(image_array, 5))
+        features['p25'] = float(np.percentile(image_array, 25))
+        features['p50'] = float(np.percentile(image_array, 50))
+        features['p75'] = float(np.percentile(image_array, 75))
+        features['p95'] = float(np.percentile(image_array, 95))
+        
+        # Intensity spread (important for CT - wide range)
+        features['intensity_range'] = features['max'] - features['min']
+        
+        # Check for air pockets (low intensity regions typical in lungs)
+        low_intensity_mask = image_array < np.percentile(image_array, 30)
+        features['low_intensity_ratio'] = float(low_intensity_mask.sum() / image_array.size)
+        
+        # Edge density (medical images have specific edge characteristics)
+        edges = sobel(image_array)
+        edge_threshold = np.percentile(edges, 90)
+        features['edge_density'] = float((edges > edge_threshold).sum() / image_array.size)
+        
+        # Texture analysis using local binary patterns proxy (standard deviation of local regions)
+        from skimage.util import view_as_blocks
+        try:
+            # Divide image into blocks
+            h, w = image_array.shape
+            block_size = min(32, h//4, w//4)
+            if block_size >= 4:
+                blocks = view_as_blocks(image_array[:h//block_size*block_size, :w//block_size*block_size], 
+                                       (block_size, block_size))
+                block_std = np.std(blocks, axis=(2,3))
+                features['texture_uniformity'] = float(np.std(block_std))
+            else:
+                features['texture_uniformity'] = 0
+        except:
+            features['texture_uniformity'] = 0
+        
+        # Frequency domain analysis (medical images have specific frequency patterns)
+        fft = np.fft.fft2(image_array)
+        fft_shift = np.fft.fftshift(fft)
+        magnitude = np.abs(fft_shift)
+        # Ratio of low to high frequencies
+        h, w = magnitude.shape
+        center_h, center_w = h//2, w//2
+        radius = min(h, w) // 8
+        Y, X = np.ogrid[:h, :w]
+        dist_from_center = np.sqrt((X - center_w)**2 + (Y - center_h)**2)
+        low_freq_mask = dist_from_center <= radius
+        high_freq_mask = dist_from_center > radius
+        low_freq_energy = np.sum(magnitude[low_freq_mask])
+        high_freq_energy = np.sum(magnitude[high_freq_mask])
+        features['freq_ratio'] = float(low_freq_energy / (high_freq_energy + 1e-8))
+        
+        # Anatomical structure detection (look for bilateral symmetry - lung feature)
+        # Split image into left and right halves
+        mid = image_array.shape[1] // 2
+        left_half = image_array[:, :mid]
+        right_half = image_array[:, mid:]
+        # Resize to same size for comparison
+        min_width = min(left_half.shape[1], right_half.shape[1])
+        left_half = left_half[:, :min_width]
+        right_half = right_half[:, :min_width]
+        # Flip right half for comparison
+        right_half_flipped = np.fliplr(right_half)
+        # Compute similarity
+        if left_half.shape == right_half_flipped.shape:
+            mse = np.mean((left_half - right_half_flipped)**2)
+            features['bilateral_symmetry'] = float(1 / (1 + mse))  # Higher = more symmetric
+        else:
+            features['bilateral_symmetry'] = 0
+        
+        return features
+        
+    except Exception as e:
+        st.warning(f"Feature extraction warning: {str(e)}")
+        return None
 
 def is_lung_ct_slice(image_array):
     """
-    Validate if an image is a lung CT slice using multiple criteria
+    Validate if an image is a lung CT slice using strict criteria
     """
     validation_results = {
         'is_lung': False,
@@ -177,93 +269,105 @@ def is_lung_ct_slice(image_array):
         if len(image_array.shape) > 2:
             image_array = image_array[:, :, 0]
         
-        # Calculate basic statistics
-        img_min = image_array.min()
-        img_max = image_array.max()
-        img_mean = image_array.mean()
-        img_std = image_array.std()
-        
-        # 1. Check image dimensions (lung CT typically 256x256 to 1024x1024)
-        h, w = image_array.shape[:2]
-        if 200 <= h <= 2048 and 200 <= w <= 2048:
-            validation_results['reasons'].append(f"✓ Dimensions: {h}×{w}")
-        else:
-            validation_results['fail_reasons'].append(f"✗ Invalid dimensions: {h}×{w} (expected 200-2048)")
+        # Extract features
+        features = extract_lung_features(image_array)
+        if features is None:
+            validation_results['fail_reasons'].append("Could not extract image features")
             return validation_results
         
-        # 2. Check intensity distribution (lung CT has specific HU range characteristics)
-        # Lung window typically -1000 to 400 HU, translates to ~0-1 range after normalization
-        if 0.0 <= img_min <= 0.1 and 0.8 <= img_max <= 1.0:
-            validation_results['reasons'].append(f"✓ Intensity range: [{img_min:.2f}, {img_max:.2f}]")
-        elif img_min >= 0 and img_max <= 255:
-            # Possibly 8-bit image that hasn't been normalized
-            validation_results['reasons'].append(f"⚠ Intensity range: [{img_min:.0f}, {img_max:.0f}] (will normalize)")
+        # CRITERION 1: Intensity range (Lung CT has wide intensity range: air to bone)
+        if features['intensity_range'] > 0.6:  # Wide range typical of CT
+            validation_results['reasons'].append(f"✓ Wide intensity range: {features['intensity_range']:.2f}")
         else:
-            validation_results['fail_reasons'].append(f"✗ Unusual intensity range: [{img_min:.2f}, {img_max:.2f}]")
+            validation_results['fail_reasons'].append(f"✗ Low intensity range: {features['intensity_range']:.2f} (needs >0.6)")
         
-        # 3. Check for lung-like texture (moderate standard deviation)
-        # Lung tissue has moderate variation due to air spaces and vessels
-        if 0.05 <= img_std <= 0.35:
-            validation_results['reasons'].append(f"✓ Texture complexity (std={img_std:.3f})")
+        # CRITERION 2: Low intensity regions (air in lungs)
+        if 0.15 < features['low_intensity_ratio'] < 0.45:
+            validation_results['reasons'].append(f"✓ Air pockets detected: {features['low_intensity_ratio']:.1%}")
         else:
-            validation_results['fail_reasons'].append(f"✗ Unusual texture (std={img_std:.3f})")
+            validation_results['fail_reasons'].append(f"✗ Abnormal air content: {features['low_intensity_ratio']:.1%} (need 15-45%)")
         
-        # 4. Check for dark lung regions (air-filled lungs should have lower intensity)
-        # Calculate percentile to find dark regions (air in lungs)
-        dark_pixels = np.percentile(image_array, 20)  # Bottom 20% intensity
-        bright_pixels = np.percentile(image_array, 80)  # Top 20% intensity
-        
-        if dark_pixels < 0.4:  # Dark regions (air) should be present
-            validation_results['reasons'].append(f"✓ Dark regions detected (20th percentile={dark_pixels:.3f})")
+        # CRITERION 3: Edge density (Lung CT has moderate edge density)
+        if 0.05 < features['edge_density'] < 0.25:
+            validation_results['reasons'].append(f"✓ Appropriate edge density: {features['edge_density']:.2f}")
         else:
-            validation_results['fail_reasons'].append(f"✗ Missing dark lung regions")
+            validation_results['fail_reasons'].append(f"✗ Unusual edge density: {features['edge_density']:.2f}")
         
-        # 5. Check for anatomical structure (two lung fields)
-        # Use Otsu threshold to find potential lung regions
-        try:
-            threshold = threshold_otsu(image_array)
-            binary = image_array > threshold
-            
-            # Remove small objects and find connected components
-            cleaned = remove_small_objects(binary, min_size=500)
-            labeled = label(cleaned)
-            
-            # Count major regions (should be 2 for lungs, or 2-3 including mediastinum)
-            region_count = len(np.unique(labeled)) - 1
-            
-            if 1 <= region_count <= 4:
-                validation_results['reasons'].append(f"✓ Anatomical regions detected: {region_count}")
-            else:
-                validation_results['fail_reasons'].append(f"✗ Unexpected region count: {region_count}")
-        except:
-            pass
-        
-        # 6. Check edge characteristics (lung CT has distinct boundaries)
-        from scipy import ndimage
-        edges = np.abs(ndimage.sobel(image_array))
-        edge_density = np.mean(edges > np.percentile(edges, 90))
-        
-        if 0.05 <= edge_density <= 0.30:
-            validation_results['reasons'].append(f"✓ Edge density appropriate ({edge_density:.3f})")
+        # CRITERION 4: Texture uniformity (Lung CT has specific texture)
+        if features['texture_uniformity'] > 0.05:
+            validation_results['reasons'].append(f"✓ Natural texture pattern: {features['texture_uniformity']:.3f}")
         else:
-            validation_results['fail_reasons'].append(f"✗ Unusual edge density ({edge_density:.3f})")
+            validation_results['fail_reasons'].append(f"✗ Unnatural texture: {features['texture_uniformity']:.3f}")
         
-        # Calculate confidence score (number of passed criteria / total criteria)
-        total_criteria = 5  # Main criteria
-        passed = len(validation_results['reasons']) - 1  # Subtract the warning count
-        validation_results['confidence'] = min(passed / total_criteria, 1.0)
+        # CRITERION 5: Frequency characteristics (CT has more low frequencies)
+        if features['freq_ratio'] > 1.5:
+            validation_results['reasons'].append(f"✓ Medical imaging frequency pattern: {features['freq_ratio']:.1f}")
+        else:
+            validation_results['fail_reasons'].append(f"✗ Wrong frequency profile: {features['freq_ratio']:.1f}")
         
-        # Determine if it's likely a lung CT
-        if passed >= 3:
+        # CRITERION 6: Bilateral symmetry (Lungs are roughly symmetric)
+        if features['bilateral_symmetry'] > 0.6:
+            validation_results['reasons'].append(f"✓ Bilateral symmetry: {features['bilateral_symmetry']:.2f}")
+        else:
+            validation_results['fail_reasons'].append(f"✗ Poor symmetry: {features['bilateral_symmetry']:.2f}")
+        
+        # Calculate confidence (weighted by importance of criteria)
+        weights = {
+            'intensity_range': 0.25,
+            'low_intensity_ratio': 0.25,
+            'edge_density': 0.15,
+            'texture_uniformity': 0.15,
+            'freq_ratio': 0.10,
+            'bilateral_symmetry': 0.10
+        }
+        
+        passed_score = 0
+        total_score = 0
+        
+        # Check intensity range
+        if features['intensity_range'] > 0.6:
+            passed_score += weights['intensity_range']
+        total_score += weights['intensity_range']
+        
+        # Check low intensity ratio
+        if 0.15 < features['low_intensity_ratio'] < 0.45:
+            passed_score += weights['low_intensity_ratio']
+        total_score += weights['low_intensity_ratio']
+        
+        # Check edge density
+        if 0.05 < features['edge_density'] < 0.25:
+            passed_score += weights['edge_density']
+        total_score += weights['edge_density']
+        
+        # Check texture uniformity
+        if features['texture_uniformity'] > 0.05:
+            passed_score += weights['texture_uniformity']
+        total_score += weights['texture_uniformity']
+        
+        # Check frequency ratio
+        if features['freq_ratio'] > 1.5:
+            passed_score += weights['freq_ratio']
+        total_score += weights['freq_ratio']
+        
+        # Check bilateral symmetry
+        if features['bilateral_symmetry'] > 0.6:
+            passed_score += weights['bilateral_symmetry']
+        total_score += weights['bilateral_symmetry']
+        
+        validation_results['confidence'] = passed_score / total_score if total_score > 0 else 0
+        
+        # Determine if lung CT (need >60% confidence AND at least 4 passed criteria)
+        if validation_results['confidence'] > 0.6 and len(validation_results['reasons']) >= 4:
             validation_results['is_lung'] = True
-            validation_results['reasons'].append(f"✓ Lung CT confidence: {validation_results['confidence']:.1%}")
+            validation_results['reasons'].append(f"✓ Lung CT confirmed ({validation_results['confidence']:.1%} confidence)")
         else:
             validation_results['is_lung'] = False
             
         return validation_results
         
     except Exception as e:
-        validation_results['fail_reasons'].append(f"✗ Validation error: {str(e)}")
+        validation_results['fail_reasons'].append(f"Validation error: {str(e)}")
+        validation_results['is_lung'] = False
         return validation_results
 
 def validate_full_ct_volume(image_volume):
@@ -278,45 +382,53 @@ def validate_full_ct_volume(image_volume):
     }
     
     try:
-        # Check dimensions (typical lung CT: 100-500 slices)
+        # Check dimensions
         num_slices, height, width = image_volume.shape
         
-        if 50 <= num_slices <= 1000:
-            validation_results['reasons'].append(f"✓ Volume depth: {num_slices} slices")
-        else:
-            validation_results['fail_reasons'].append(f"✗ Unusual slice count: {num_slices}")
+        if not (50 <= num_slices <= 1000):
+            validation_results['fail_reasons'].append(f"Invalid slice count: {num_slices} (should be 50-1000)")
             return validation_results
         
-        # Sample slices to validate
-        sample_indices = [0, num_slices//4, num_slices//2, 3*num_slices//4, num_slices-1]
-        lung_slice_count = 0
+        if not (200 <= height <= 1024 and 200 <= width <= 1024):
+            validation_results['fail_reasons'].append(f"Invalid dimensions: {height}×{width}")
+            return validation_results
         
-        for idx in sample_indices:
-            slice_img = image_volume[idx]
+        validation_results['reasons'].append(f"✓ Volume dimensions: {num_slices} slices, {height}×{width}")
+        
+        # Sample slices at different positions
+        sample_positions = [0, num_slices//4, num_slices//2, 3*num_slices//4, num_slices-1]
+        lung_slice_scores = []
+        
+        for pos in sample_positions:
+            slice_img = image_volume[pos]
             # Normalize if needed
             if slice_img.max() > 1.0:
                 slice_img = slice_img / 255.0
             
             result = is_lung_ct_slice(slice_img)
             if result['is_lung']:
-                lung_slice_count += 1
+                lung_slice_scores.append(result['confidence'])
         
-        # If majority of sampled slices are lung-like
-        if lung_slice_count >= 3:
-            validation_results['is_lung'] = True
-            validation_results['confidence'] = lung_slice_count / len(sample_indices)
-            validation_results['reasons'].append(f"✓ {lung_slice_count}/{len(sample_indices)} slices validated as lung CT")
+        if lung_slice_scores:
+            avg_confidence = np.mean(lung_slice_scores)
+            validation_results['confidence'] = avg_confidence
+            
+            if avg_confidence > 0.6 and len(lung_slice_scores) >= 3:
+                validation_results['is_lung'] = True
+                validation_results['reasons'].append(f"✓ {len(lung_slice_scores)}/{len(sample_positions)} slices validated as lung CT")
+            else:
+                validation_results['fail_reasons'].append(f"Only {len(lung_slice_scores)}/{len(sample_positions)} slices passed validation")
         else:
-            validation_results['fail_reasons'].append(f"✗ Only {lung_slice_count}/{len(sample_indices)} slices appear lung-like")
+            validation_results['fail_reasons'].append("No valid lung CT slices found in volume")
             
     except Exception as e:
-        validation_results['fail_reasons'].append(f"✗ Volume validation error: {str(e)}")
+        validation_results['fail_reasons'].append(f"Volume validation error: {str(e)}")
     
     return validation_results
 
 # ========== GOOGLE DRIVE SETUP ==========
 GOOGLE_DRIVE_FILE_ID = "1PzCv2fJSr7e0QIfPGtLKLOL-9RSLdR2i"
-MODEL_FILENAME = "best_model(1).pth"
+MODEL_FILENAME = "best_model.pth"
 
 @st.cache_resource
 def download_and_load_model():
@@ -460,11 +572,11 @@ def load_and_preprocess_image(uploaded_file):
         # Convert to numpy array
         image_array = np.array(image, dtype=np.float32)
         
-        # Ensure 2D array (remove any extra dimensions)
+        # Ensure 2D array
         if len(image_array.shape) > 2:
             image_array = image_array[:, :, 0]
         
-        # Normalize to [0, 1] range
+        # Normalize to [0, 1] range if needed
         if image_array.max() > 1.0:
             image_array = image_array / 255.0
         
@@ -474,15 +586,16 @@ def load_and_preprocess_image(uploaded_file):
         st.error(f"Error loading image: {str(e)}")
         return None, False
 
-def normalize_ct_image(image_array):
-    """Apply lung window normalization [-1000, 400] HU"""
-    # Convert from [0,1] range to HU range approximation
+def prepare_for_model(image_array):
+    """Prepare image for model input with lung window"""
+    # Convert to HU range approximation
+    # Typical CT: -1000 HU (air) to +400 HU (soft tissue)
     image_hu = image_array * 1400 - 1000
     
     # Clip to lung window
     image_hu = np.clip(image_hu, -1000, 400)
     
-    # Normalize back to [0,1] for model input
+    # Normalize back to [0,1]
     normalized = (image_hu + 1000) / 1400
     
     return normalized
@@ -494,10 +607,10 @@ def segment_nodule(model, image_array):
         if len(image_array.shape) > 2:
             image_array = image_array[:, :, 0]
         
-        # Normalize CT window
-        normalized = normalize_ct_image(image_array)
+        # Prepare for model
+        normalized = prepare_for_model(image_array)
         
-        # Resize to 512x512 (model expects 512x512)
+        # Resize to 512x512
         resized = resize(normalized, (512, 512), preserve_range=True)
         
         # Convert to tensor
@@ -509,7 +622,7 @@ def segment_nodule(model, image_array):
             probs = torch.sigmoid(output)
             mask = (probs > 0.5).float().squeeze().numpy()
         
-        # Resize back to original dimensions
+        # Resize back to original
         mask_original = resize(mask, image_array.shape, order=0, preserve_range=True)
         
         # Find connected components
@@ -532,45 +645,6 @@ def segment_nodule(model, image_array):
     except Exception as e:
         st.error(f"Segmentation error: {str(e)}")
         return [], None
-
-def load_mhd_raw(mhd_bytes, raw_bytes):
-    """Load and parse MHD + RAW files"""
-    with tempfile.NamedTemporaryFile(suffix='.mhd', delete=False) as mhd_file:
-        mhd_file.write(mhd_bytes)
-        mhd_path = mhd_file.name
-    
-    with tempfile.NamedTemporaryFile(suffix='.raw', delete=False) as raw_file:
-        raw_file.write(raw_bytes)
-        raw_path = raw_file.name
-    
-    try:
-        # Update MHD file to point to correct RAW path
-        with open(mhd_path, 'r') as f:
-            content = f.read()
-        
-        # Replace the RAW filename in MHD
-        import re
-        content = re.sub(r'ElementDataFile = .*\.raw', f'ElementDataFile = {raw_path}', content)
-        
-        with open(mhd_path, 'w') as f:
-            f.write(content)
-        
-        # Load with SimpleITK
-        img = sitk.ReadImage(mhd_path)
-        array = sitk.GetArrayFromImage(img)
-        
-        return array, img
-        
-    except Exception as e:
-        st.error(f"Error loading MHD/RAW: {e}")
-        return None, None
-    finally:
-        # Clean up temp files
-        try:
-            os.unlink(mhd_path)
-            os.unlink(raw_path)
-        except:
-            pass
 
 # ========== MAIN UI ==========
 def main():
@@ -646,149 +720,107 @@ def main():
         
         uploaded_file = st.file_uploader(
             "Select CT Image",
-            type=["png", "jpg", "jpeg", "dcm"],
-            help="Upload a lung CT slice in PNG, JPG, JPEG, or DICOM format"
+            type=["png", "jpg", "jpeg"],
+            help="Upload a lung CT slice in PNG, JPG, or JPEG format"
         )
         
         if uploaded_file:
-            # Load and preprocess image
+            # Load image
             image_array, success = load_and_preprocess_image(uploaded_file)
             
             if success and image_array is not None:
-                # Validate if it's a lung CT
-                with st.spinner("Validating image..."):
+                # Show preview
+                col1, col2 = st.columns([2, 1])
+                
+                with col1:
+                    st.image(image_array, caption="Uploaded Image", use_container_width=True, clamp=True)
+                
+                # Validate
+                with st.spinner("Validating image type..."):
                     validation = is_lung_ct_slice(image_array)
                 
                 if not validation['is_lung']:
                     st.markdown('<div class="warning-box">', unsafe_allow_html=True)
-                    st.error("❌ **INVALID IMAGE TYPE**")
-                    st.markdown("This system is designed **exclusively for lung CT scans**.")
+                    st.error("❌ **INVALID IMAGE TYPE - NOT A LUNG CT SCAN**")
                     
-                    st.markdown("**Validation failed for the following reasons:**")
+                    st.markdown("**Reasons for rejection:**")
                     for reason in validation['fail_reasons']:
                         st.markdown(f"- {reason}")
                     
                     st.markdown("---")
-                    st.markdown("**Please upload a valid lung CT slice.** Examples of accepted images:")
-                    st.markdown("- Lung CT scan (any window setting)")
-                    st.markdown("- Coronal, sagittal, or axial lung views")
-                    st.markdown("- DICOM format preferred, but PNG/JPG accepted")
+                    st.markdown("**This system only accepts valid lung CT images.**")
+                    st.markdown("The image you uploaded does not have the characteristic features of a lung CT scan:")
+                    st.markdown("- Appropriate intensity range (air to tissue)")
+                    st.markdown("- Air pockets (dark regions representing lungs)")
+                    st.markdown("- Bilateral symmetry (two lung fields)")
+                    st.markdown("- Medical imaging texture patterns")
                     st.markdown('</div>', unsafe_allow_html=True)
                     return
                 
                 # Show validation success
                 st.markdown('<div class="success-box">', unsafe_allow_html=True)
                 st.markdown("✅ **Lung CT Verified**")
-                for reason in validation['reasons'][:3]:  # Show first 3 validations
-                    st.markdown(reason)
-                st.markdown(f"*Confidence: {validation['confidence']:.1%}*")
+                for reason in validation['reasons'][:4]:
+                    st.markdown(f"- {reason}")
+                st.markdown(f"**Confidence: {validation['confidence']:.1%}**")
                 st.markdown('</div>', unsafe_allow_html=True)
-                
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    st.markdown('<div class="clinical-card">', unsafe_allow_html=True)
-                    st.image(image_array, caption="Original CT Slice", use_container_width=True, clamp=True)
-                    st.markdown(f"*Dimensions: {image_array.shape[1]}×{image_array.shape[0]}*")
-                    st.markdown('</div>', unsafe_allow_html=True)
-                
-                with col2:
-                    st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-                    st.metric("Image Size", f"{image_array.shape[1]}×{image_array.shape[0]}")
-                    st.metric("Format", uploaded_file.type.upper() if uploaded_file.type else "IMAGE")
-                    st.metric("Lung CT Confidence", f"{validation['confidence']:.1%}")
-                    st.markdown('</div>', unsafe_allow_html=True)
                 
                 # Load model
                 with st.spinner("Loading AI Model..."):
-                    model, success = download_and_load_model()
+                    model, model_success = download_and_load_model()
                 
-                if success and st.button("🔍 Run Analysis", type="primary"):
-                    with st.spinner("AI Analyzing..."):
+                if model_success and st.button("🔍 Run Analysis", type="primary"):
+                    with st.spinner("Segmenting lung nodules..."):
                         detections, mask = segment_nodule(model, image_array)
                     
-                    if detections and len(detections) > 0:
+                    if detections:
                         st.markdown(f'<div class="success-box">✅ <strong>{len(detections)} nodule(s) detected</strong></div>', unsafe_allow_html=True)
                         
                         for idx, d in enumerate(detections):
-                            st.markdown(f'<div class="clinical-card">', unsafe_allow_html=True)
-                            st.markdown(f"#### Nodule {idx+1}")
-                            
-                            col_a, col_b = st.columns(2)
-                            
-                            with col_a:
+                            with st.expander(f"Nodule {idx+1} - Area: {d['area']:.0f} pixels²", expanded=True):
                                 # Create overlay
                                 overlay = np.stack([image_array] * 3, axis=-1)
-                                # Normalize for display
                                 overlay = (overlay - overlay.min()) / (overlay.max() - overlay.min() + 1e-8)
-                                # Apply red mask for nodule
                                 overlay[:, :, 0] = np.where(d['mask'] > 0.5, 1.0, overlay[:, :, 0])
                                 overlay[:, :, 1] = np.where(d['mask'] > 0.5, 0.0, overlay[:, :, 1])
                                 overlay[:, :, 2] = np.where(d['mask'] > 0.5, 0.0, overlay[:, :, 2])
-                                st.image(overlay, caption=f"Nodule {idx+1} Overlay", use_container_width=True, clamp=True)
-                            
-                            with col_b:
-                                st.metric("Area", f"{d['area']:.0f} pixels²")
                                 
-                                if d['area'] < 100:
-                                    st.info("📌 **Size:** Small\n**Recommendation:** Routine monitoring")
-                                elif d['area'] < 300:
-                                    st.warning("⚠️ **Size:** Medium\n**Recommendation:** Short-term follow-up")
-                                else:
-                                    st.error("🚨 **Size:** Large\n**Recommendation:** Urgent consultation")
-                                
-                                if len(d['centroid']) >= 2:
+                                col_img, col_info = st.columns(2)
+                                with col_img:
+                                    st.image(overlay, caption=f"Nodule {idx+1} Highlighted", use_container_width=True)
+                                with col_info:
+                                    st.metric("Area", f"{d['area']:.0f} pixels²")
                                     st.metric("Centroid (x,y)", f"({d['centroid'][1]:.0f}, {d['centroid'][0]:.0f})")
-                            
-                            st.markdown('</div>', unsafe_allow_html=True)
-                        
-                        # Generate report
-                        report = f"""LUNG NODULE DETECTION REPORT
-{'='*50}
-Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-Image Dimensions: {image_array.shape[1]}×{image_array.shape[0]}
-Validation Confidence: {validation['confidence']:.1%}
-Nodules Detected: {len(detections)}
-
-DETAILS:
-"""
-                        for idx, d in enumerate(detections):
-                            report += f"""
-Nodule {idx+1}:
-  - Area: {d['area']:.0f} pixels²
-  - Location (x,y): ({d['centroid'][1]:.0f}, {d['centroid'][0]:.0f})
-  - Recommendation: {'Routine monitoring' if d['area'] < 100 else 'Short-term follow-up' if d['area'] < 300 else 'Urgent consultation'}
-"""
-                        
-                        st.download_button("📊 Download Clinical Report", report, f"nodule_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
-                        
+                                    
+                                    if d['area'] < 100:
+                                        st.info("📌 **Size:** Small - Routine monitoring recommended")
+                                    elif d['area'] < 300:
+                                        st.warning("⚠️ **Size:** Medium - Short-term follow-up recommended")
+                                    else:
+                                        st.error("🚨 **Size:** Large - Urgent consultation recommended")
                     else:
                         st.markdown('<div class="info-box">✓ No nodules detected in this slice</div>', unsafe_allow_html=True)
             else:
-                st.error("Could not load image. Please try a different file.")
+                st.error("Failed to load image. Please try another file.")
     
-    else:
-        st.markdown('<div class="info-box">📌 <strong>Full CT Analysis:</strong> Upload a ZIP file containing both MHD and RAW files for volumetric analysis.</div>', unsafe_allow_html=True)
+    else:  # Full CT Volume
+        st.markdown('<div class="info-box">📌 <strong>Full CT Analysis:</strong> Upload a ZIP file containing MHD and RAW files.</div>', unsafe_allow_html=True)
         
-        # Single file upload for ZIP containing both MHD and RAW
         uploaded_zip = st.file_uploader(
-            "Select ZIP file containing .mhd and .raw files",
+            "Select ZIP file with .mhd and .raw files",
             type=["zip"],
-            help="Upload a ZIP archive that contains both the .mhd and .raw files together"
+            help="Upload a ZIP containing both the .mhd and .raw files"
         )
         
         if uploaded_zip:
-            # Extract ZIP
             with tempfile.TemporaryDirectory() as tmpdir:
                 zip_path = os.path.join(tmpdir, "upload.zip")
                 with open(zip_path, "wb") as f:
                     f.write(uploaded_zip.getbuffer())
                 
-                # Extract
                 with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                     zip_ref.extractall(tmpdir)
                 
-                # Find MHD and RAW files
                 mhd_file = None
                 raw_file = None
                 
@@ -799,96 +831,80 @@ Nodule {idx+1}:
                         raw_file = os.path.join(tmpdir, file)
                 
                 if mhd_file and raw_file:
-                    st.success(f"Found: {os.path.basename(mhd_file)} and {os.path.basename(raw_file)}")
+                    st.success("Files loaded successfully")
                     
-                    # Load and validate volume
-                    img = sitk.ReadImage(mhd_file)
-                    array = sitk.GetArrayFromImage(img)
+                    # Load volume
+                    with st.spinner("Loading CT volume..."):
+                        img = sitk.ReadImage(mhd_file)
+                        array = sitk.GetArrayFromImage(img)
+                        
+                        if array.max() > 1.0:
+                            array = array / 255.0
                     
-                    # Normalize array
-                    if array.max() > 1.0:
-                        array = array / 255.0
-                    
-                    # Validate volume
+                    # Validate
                     with st.spinner("Validating CT volume..."):
                         validation = validate_full_ct_volume(array)
                     
                     if not validation['is_lung']:
                         st.markdown('<div class="warning-box">', unsafe_allow_html=True)
-                        st.error("❌ **INVALID VOLUME TYPE**")
-                        st.markdown("This system is designed **exclusively for lung CT volumes**.")
-                        
+                        st.error("❌ **INVALID - NOT A LUNG CT VOLUME**")
                         for reason in validation['fail_reasons']:
                             st.markdown(f"- {reason}")
-                        
                         st.markdown('</div>', unsafe_allow_html=True)
                         return
                     
                     st.markdown('<div class="success-box">', unsafe_allow_html=True)
                     st.markdown("✅ **Lung CT Volume Verified**")
                     for reason in validation['reasons']:
-                        st.markdown(reason)
-                    st.markdown(f"*Confidence: {validation['confidence']:.1%}*")
+                        st.markdown(f"- {reason}")
                     st.markdown('</div>', unsafe_allow_html=True)
                     
+                    # Show info
                     st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-                    st.metric("Volume Dimensions", f"{array.shape[0]} × {array.shape[1]} × {array.shape[2]}")
-                    st.metric("Spacing", f"{img.GetSpacing()[0]:.2f}mm")
-                    st.metric("Validation Confidence", f"{validation['confidence']:.1%}")
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Slices", array.shape[0])
+                    with col2:
+                        st.metric("Dimensions", f"{array.shape[1]}×{array.shape[2]}")
+                    with col3:
+                        st.metric("Spacing", f"{img.GetSpacing()[0]:.2f}mm")
                     st.markdown('</div>', unsafe_allow_html=True)
                     
-                    # Display middle slice for preview
-                    middle_slice = array[array.shape[0]//2]
-                    middle_slice_norm = (middle_slice - middle_slice.min()) / (middle_slice.max() - middle_slice.min() + 1e-8)
-                    st.image(middle_slice_norm, caption="Middle Slice Preview", use_container_width=True, clamp=True)
+                    # Preview
+                    mid_slice = array[array.shape[0]//2]
+                    st.image(mid_slice, caption="Middle Slice Preview", use_container_width=True, clamp=True)
                     
                     if st.button("🔍 Analyze Full Volume", type="primary"):
-                        st.info("Full 3D volumetric analysis processing...")
+                        st.info("Processing full volume...")
+                        model, model_success = download_and_load_model()
                         
-                        # Process each slice
-                        detections_all = []
-                        model, success = download_and_load_model()
-                        
-                        if success:
-                            progress_bar = st.progress(0)
-                            status_text = st.empty()
+                        if model_success:
+                            all_detections = []
+                            progress = st.progress(0)
                             
                             for i in range(array.shape[0]):
-                                status_text.text(f"Processing slice {i+1}/{array.shape[0]}")
-                                slice_img = array[i]
-                                
-                                # Segment
-                                detections, _ = segment_nodule(model, slice_img)
-                                
-                                if detections:
-                                    for d in detections:
-                                        detections_all.append({
-                                            'slice': i,
-                                            'area': d['area'],
-                                            'centroid_x': d['centroid'][1],
-                                            'centroid_y': d['centroid'][0]
-                                        })
-                                
-                                progress_bar.progress((i + 1) / array.shape[0])
+                                detections, _ = segment_nodule(model, array[i])
+                                for d in detections:
+                                    all_detections.append({
+                                        'slice': i,
+                                        'area': d['area'],
+                                        'x': d['centroid'][1],
+                                        'y': d['centroid'][0]
+                                    })
+                                progress.progress((i + 1) / array.shape[0])
                             
-                            status_text.text("Analysis complete!")
-                            
-                            # Show results
-                            if detections_all:
-                                st.markdown(f'<div class="success-box">✅ <strong>{len(detections_all)} nodule(s) detected across {array.shape[0]} slices</strong></div>', unsafe_allow_html=True)
-                                
-                                # Group by slice
+                            if all_detections:
+                                st.success(f"Found {len(all_detections)} nodules across {array.shape[0]} slices")
                                 import pandas as pd
-                                df = pd.DataFrame(detections_all)
+                                df = pd.DataFrame(all_detections)
                                 st.dataframe(df, use_container_width=True)
                                 
-                                # Download results
                                 csv = df.to_csv(index=False)
-                                st.download_button("📊 Download Results CSV", csv, "nodule_detections.csv")
+                                st.download_button("Download Results CSV", csv, "nodule_detections.csv")
                             else:
-                                st.markdown('<div class="info-box">✓ No nodules detected in this volume</div>', unsafe_allow_html=True)
+                                st.info("No nodules detected in this volume")
                 else:
-                    st.error("ZIP file must contain both .mhd and .raw files")
+                    st.error("ZIP must contain both .mhd and .raw files")
     
     # Footer
     st.markdown("""
