@@ -172,8 +172,8 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ========== GOOGLE DRIVE SETUP ==========
-GOOGLE_DRIVE_FILE_ID = "1FdIozNEVbIPUsjcdReAfmbgN3Nisx9yQ"
-MODEL_FILENAME = "checkpoint_epoch_90.pth"
+GOOGLE_DRIVE_FILE_ID = "1PzCv2fJSr7e0QIfPGtLKLOL-9RSLdR2i"
+MODEL_FILENAME = "best_model(1).pth"
 
 @st.cache_resource
 def download_and_load_model():
