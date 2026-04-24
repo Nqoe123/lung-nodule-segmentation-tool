@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 from skimage.transform import resize
 from skimage.measure import label, regionprops
+from skimage.exposure import equalize_adapthist
 import tempfile
 import SimpleITK as sitk
 from collections import OrderedDict
@@ -15,6 +16,7 @@ from datetime import datetime
 import zipfile
 import os
 import gdown
+import matplotlib.pyplot as plt
 
 warnings.filterwarnings('ignore')
 
@@ -228,25 +230,80 @@ def load_model_from_drive():
         st.info("Please make sure the Google Drive file ID is correct and the file is accessible.")
         return None
 
-# ========== SEGMENTATION FUNCTIONS ==========
-def segment_image(model, image_array):
-    """Run segmentation on a single image"""
+# ========== CT IMAGE PROCESSING FUNCTIONS ==========
+
+def apply_lung_window(image_array):
+    """
+    Apply lung window settings for display
+    Lung window: width 1500 HU, level -600 HU (shows -1350 to +150 HU)
+    """
+    # Normalize to 0-1 range for display
+    min_hu = -1350
+    max_hu = 150
+    
+    # Clip to lung window range
+    clipped = np.clip(image_array, min_hu, max_hu)
+    
+    # Normalize to 0-1 for display
+    normalized = (clipped - min_hu) / (max_hu - min_hu)
+    
+    return normalized
+
+def preprocess_for_model(image_array):
+    """
+    Preprocess CT image for model input
+    Your model was trained on CT images normalized to [0,1] range
+    """
+    # Your training normalization: (image - min) / (max - min)
+    # Assuming input is already in HU or 0-255 range
+    
+    # Convert to float if needed
+    if image_array.dtype == np.uint8:
+        image_array = image_array.astype(np.float32)
+    
+    # Normalize to [0, 1] range
+    if image_array.max() > 1.0:
+        # Scale to 0-1
+        image_array = (image_array - image_array.min()) / (image_array.max() - image_array.min() + 1e-8)
+    
+    return image_array
+
+def load_ct_image(uploaded_file):
+    """Load and prepare CT image for processing"""
     try:
-        # Ensure 2D grayscale
-        if len(image_array.shape) > 2:
-            image_array = image_array[:, :, 0]
+        # Open image
+        image = Image.open(uploaded_file)
         
-        # Normalize to [0,1]
-        if image_array.max() > 1.0:
-            image_array = image_array / 255.0
+        # Convert to grayscale
+        if image.mode != 'L':
+            image = image.convert('L')
         
-        # Store original shape for resizing back
+        # Convert to numpy array
+        image_array = np.array(image, dtype=np.float32)
+        
+        # Display info
+        st.write(f"Image range: [{image_array.min():.1f}, {image_array.max():.1f}]")
+        st.write(f"Image dtype: {image_array.dtype}")
+        
+        return image_array, True
+    
+    except Exception as e:
+        st.error(f"Error loading image: {str(e)}")
+        return None, False
+
+def segment_nodule(model, image_array):
+    """Run segmentation on a single CT slice"""
+    try:
+        # Store original shape
         original_shape = image_array.shape
         
-        # Resize to 512x512 (model expects this size from training)
-        resized = resize(image_array, (512, 512), preserve_range=True)
+        # Preprocess for model
+        model_input = preprocess_for_model(image_array.copy())
         
-        # Convert to tensor: add batch and channel dimensions
+        # Resize to 512x512 (model input size)
+        resized = resize(model_input, (512, 512), preserve_range=True)
+        
+        # Convert to tensor
         input_tensor = torch.FloatTensor(resized).unsqueeze(0).unsqueeze(0)
         
         # Run model
@@ -255,7 +312,7 @@ def segment_image(model, image_array):
             probs = torch.sigmoid(output)
             mask = (probs > 0.5).float().squeeze().numpy()
         
-        # Resize mask back to original image size
+        # Resize mask back to original size
         mask_resized = resize(mask, original_shape, order=0, preserve_range=True)
         
         # Find connected components (nodules)
@@ -285,7 +342,26 @@ def segment_image(model, image_array):
     
     except Exception as e:
         st.error(f"Segmentation error: {str(e)}")
+        import traceback
+        st.code(traceback.format_exc())
         return [], None
+
+def create_overlay(image_array, mask, nodules):
+    """Create RGB overlay with detected nodules highlighted"""
+    # Normalize image for display
+    img_norm = (image_array - image_array.min()) / (image_array.max() - image_array.min() + 1e-8)
+    
+    # Create RGB overlay
+    overlay = np.stack([img_norm] * 3, axis=-1)
+    
+    # Highlight each nodule
+    for nodule in nodules:
+        mask_bool = nodule['mask'] > 0.5
+        overlay[mask_bool, 0] = 1.0  # Red channel
+        overlay[mask_bool, 1] = 0.0  # Green channel
+        overlay[mask_bool, 2] = 0.0  # Blue channel
+    
+    return overlay
 
 def load_ct_volume(zip_file):
     """Load MHD/RAW CT volume from ZIP file"""
@@ -359,7 +435,7 @@ def main():
         st.markdown("- **Architecture:** Memory Efficient U-Net")
         st.markdown("- **Training Data:** LUNA16")
         st.markdown("- **Input Size:** 512×512")
-        st.markdown("- **Channels:** 64")
+        st.markdown("- **Initial Channels:** 64")
         
         st.markdown("---")
         st.markdown("### Instructions")
@@ -369,7 +445,8 @@ def main():
         st.markdown("4. Download clinical report")
     
     # Load model from Google Drive
-    model = load_model_from_drive()
+    with st.spinner("Loading AI model..."):
+        model = load_model_from_drive()
     
     if model is None:
         st.stop()
@@ -387,85 +464,96 @@ def main():
     if upload_type == "Single CT Slice":
         uploaded_file = st.file_uploader(
             "Upload CT Slice",
-            type=["png", "jpg", "jpeg"],
-            help="Upload a single lung CT slice in PNG or JPEG format"
+            type=["png", "jpg", "jpeg", "dcm"],
+            help="Upload a single lung CT slice"
         )
         
         if uploaded_file:
-            # Load and display image
-            image = Image.open(uploaded_file).convert('L')
-            image_array = np.array(image, dtype=np.float32)
+            # Load image
+            image_array, success = load_ct_image(uploaded_file)
             
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.image(image_array, caption="Original CT Slice", use_container_width=True, clamp=True)
-                st.caption(f"Dimensions: {image_array.shape[1]}×{image_array.shape[0]} pixels")
-            
-            # Analyze button
-            if st.button("🔍 Detect Nodules", type="primary"):
-                with st.spinner("Segmenting lung nodules..."):
-                    nodules, mask = segment_image(model, image_array)
+            if success and image_array is not None:
+                # Apply lung window for better display
+                display_img = apply_lung_window(image_array)
                 
-                if nodules:
-                    # Create overlay
-                    overlay = np.stack([image_array / 255.0] * 3, axis=-1)
-                    for nodule in nodules:
-                        mask_bool = nodule['mask'] > 0.5
-                        overlay[mask_bool, 0] = 1.0  # Red
-                        overlay[mask_bool, 1] = 0.0  # Green
-                        overlay[mask_bool, 2] = 0.0  # Blue
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.image(display_img, caption="Original CT Slice (Lung Window)", use_container_width=True, clamp=True)
+                    st.caption(f"Dimensions: {image_array.shape[1]}×{image_array.shape[0]} pixels")
+                    st.caption(f"Intensity range: [{image_array.min():.1f}, {image_array.max():.1f}]")
+                
+                # Analyze button
+                if st.button("🔍 Detect Nodules", type="primary"):
+                    with st.spinner("Segmenting lung nodules..."):
+                        nodules, mask = segment_nodule(model, image_array)
                     
-                    with col2:
-                        st.image(overlay, caption=f"{len(nodules)} Nodule(s) Detected", use_container_width=True, clamp=True)
-                    
-                    # Display results table
-                    st.markdown("## 📊 Nodule Measurements")
-                    
-                    results_data = []
-                    for nodule in nodules:
-                        results_data.append({
-                            "Nodule #": nodule['id'],
-                            "Area (pixels²)": f"{nodule['area_pixels']:.0f}",
-                            "Diameter (pixels)": f"{nodule['diameter_pixels']:.1f}",
-                            "Centroid X": f"{nodule['centroid_x']:.0f}",
-                            "Centroid Y": f"{nodule['centroid_y']:.0f}"
-                        })
-                    
-                    df = pd.DataFrame(results_data)
-                    st.dataframe(df, use_container_width=True)
-                    
-                    # Clinical recommendations
-                    st.markdown("## 🩺 Clinical Recommendations")
-                    
-                    for nodule in nodules:
-                        if nodule['area_pixels'] < 100:
-                            st.markdown(f"""
-                            <div class="info-box">
-                                <strong>Nodule {nodule['id']}:</strong> Small nodule ({nodule['area_pixels']:.0f} pixels²)<br>
-                                📌 Recommendation: Routine follow-up in 12 months
-                            </div>
-                            """, unsafe_allow_html=True)
-                        elif nodule['area_pixels'] < 300:
-                            st.markdown(f"""
-                            <div class="warning-box">
-                                <strong>Nodule {nodule['id']}:</strong> Medium nodule ({nodule['area_pixels']:.0f} pixels²)<br>
-                                ⚠️ Recommendation: Short-term follow-up in 6 months
-                            </div>
-                            """, unsafe_allow_html=True)
-                        else:
-                            st.markdown(f"""
-                            <div class="warning-box">
-                                <strong>Nodule {nodule['id']}:</strong> Large nodule ({nodule['area_pixels']:.0f} pixels²)<br>
-                                🚨 Recommendation: Urgent consultation recommended
-                            </div>
-                            """, unsafe_allow_html=True)
-                    
-                    # Download report
-                    report_text = f"""LUNG NODULE DETECTION REPORT
+                    if nodules:
+                        # Create overlay
+                        overlay = create_overlay(image_array, mask, nodules)
+                        
+                        with col2:
+                            st.image(overlay, caption=f"{len(nodules)} Nodule(s) Detected", use_container_width=True, clamp=True)
+                        
+                        # Display results table
+                        st.markdown("## 📊 Nodule Measurements")
+                        
+                        results_data = []
+                        for nodule in nodules:
+                            results_data.append({
+                                "Nodule #": nodule['id'],
+                                "Area (pixels²)": f"{nodule['area_pixels']:.0f}",
+                                "Diameter (pixels)": f"{nodule['diameter_pixels']:.1f}",
+                                "Centroid X": f"{nodule['centroid_x']:.0f}",
+                                "Centroid Y": f"{nodule['centroid_y']:.0f}"
+                            })
+                        
+                        df = pd.DataFrame(results_data)
+                        st.dataframe(df, use_container_width=True)
+                        
+                        # Visualize mask
+                        st.markdown("## 🔬 Segmentation Mask")
+                        fig, ax = plt.subplots(1, 2, figsize=(10, 5))
+                        ax[0].imshow(display_img, cmap='gray')
+                        ax[0].set_title('Original')
+                        ax[0].axis('off')
+                        ax[1].imshow(mask, cmap='hot')
+                        ax[1].set_title('Nodule Probability Mask')
+                        ax[1].axis('off')
+                        st.pyplot(fig)
+                        
+                        # Clinical recommendations
+                        st.markdown("## 🩺 Clinical Recommendations")
+                        
+                        for nodule in nodules:
+                            if nodule['area_pixels'] < 100:
+                                st.markdown(f"""
+                                <div class="info-box">
+                                    <strong>Nodule {nodule['id']}:</strong> Small nodule ({nodule['area_pixels']:.0f} pixels²)<br>
+                                    📌 Recommendation: Routine follow-up in 12 months
+                                </div>
+                                """, unsafe_allow_html=True)
+                            elif nodule['area_pixels'] < 300:
+                                st.markdown(f"""
+                                <div class="warning-box">
+                                    <strong>Nodule {nodule['id']}:</strong> Medium nodule ({nodule['area_pixels']:.0f} pixels²)<br>
+                                    ⚠️ Recommendation: Short-term follow-up in 6 months
+                                </div>
+                                """, unsafe_allow_html=True)
+                            else:
+                                st.markdown(f"""
+                                <div class="warning-box">
+                                    <strong>Nodule {nodule['id']}:</strong> Large nodule ({nodule['area_pixels']:.0f} pixels²)<br>
+                                    🚨 Recommendation: Urgent consultation recommended
+                                </div>
+                                """, unsafe_allow_html=True)
+                        
+                        # Download report
+                        report_text = f"""LUNG NODULE DETECTION REPORT
 {'='*50}
 Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 Image: {uploaded_file.name}
+Dimensions: {image_array.shape[1]}×{image_array.shape[0]} pixels
 Nodules Detected: {len(nodules)}
 
 {'='*50}
@@ -473,8 +561,8 @@ MEASUREMENTS:
 {'='*50}
 
 """
-                    for nodule in nodules:
-                        report_text += f"""
+                        for nodule in nodules:
+                            report_text += f"""
 Nodule #{nodule['id']}:
   - Area: {nodule['area_pixels']:.0f} pixels²
   - Diameter: {nodule['diameter_pixels']:.1f} pixels
@@ -482,29 +570,33 @@ Nodule #{nodule['id']}:
   - Bounding Box: Rows {nodule['min_row']}-{nodule['max_row']}, Cols {nodule['min_col']}-{nodule['max_col']}
 
 """
-                    
-                    report_text += f"""
+                        
+                        report_text += f"""
 {'='*50}
 CLINICAL RECOMMENDATIONS:
 {'='*50}
 """
-                    for nodule in nodules:
-                        if nodule['area_pixels'] < 100:
-                            report_text += f"\nNodule #{nodule['id']}: Routine follow-up in 12 months"
-                        elif nodule['area_pixels'] < 300:
-                            report_text += f"\nNodule #{nodule['id']}: Short-term follow-up in 6 months"
-                        else:
-                            report_text += f"\nNodule #{nodule['id']}: Urgent consultation recommended"
-                    
-                    st.download_button(
-                        "📄 Download Clinical Report",
-                        report_text,
-                        f"lung_nodule_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-                        use_container_width=True
-                    )
-                    
-                else:
-                    st.info("✓ No nodules detected in this CT slice")
+                        for nodule in nodules:
+                            if nodule['area_pixels'] < 100:
+                                report_text += f"\nNodule #{nodule['id']}: Routine follow-up in 12 months"
+                            elif nodule['area_pixels'] < 300:
+                                report_text += f"\nNodule #{nodule['id']}: Short-term follow-up in 6 months"
+                            else:
+                                report_text += f"\nNodule #{nodule['id']}: Urgent consultation recommended"
+                        
+                        st.download_button(
+                            "📄 Download Clinical Report",
+                            report_text,
+                            f"lung_nodule_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                            use_container_width=True
+                        )
+                        
+                    else:
+                        st.info("✓ No nodules detected in this CT slice")
+                        # Show the mask anyway
+                        _, mask = segment_nodule(model, image_array)
+                        if mask is not None and mask.max() > 0:
+                            st.image(mask, caption="Segmentation Mask (No significant nodules found)", use_container_width=True)
     
     else:  # Full CT Volume
         uploaded_zip = st.file_uploader(
@@ -530,16 +622,17 @@ CLINICAL RECOMMENDATIONS:
                     if spacing:
                         st.metric("Pixel Spacing", f"{spacing[0]:.3f} mm")
                 
-                # Preview middle slice
+                # Preview middle slice with lung window
                 mid_slice = volume[volume.shape[0] // 2]
-                st.image(mid_slice, caption=f"Preview - Middle Slice ({volume.shape[0]//2})", use_container_width=True, clamp=True)
+                display_slice = apply_lung_window(mid_slice)
+                st.image(display_slice, caption=f"Preview - Middle Slice ({volume.shape[0]//2})", use_container_width=True, clamp=True)
                 
                 # Slice range selector
                 st.markdown("### Analysis Range")
                 slice_range = st.slider(
                     "Select slice range to analyze",
                     0, volume.shape[0] - 1,
-                    (0, volume.shape[0] - 1)
+                    (0, min(100, volume.shape[0] - 1))
                 )
                 
                 if st.button("🔍 Analyze Full Volume", type="primary"):
@@ -547,17 +640,15 @@ CLINICAL RECOMMENDATIONS:
                     progress_bar = st.progress(0)
                     status_text = st.empty()
                     
+                    total_slices = slice_range[1] - slice_range[0] + 1
+                    
                     for i in range(slice_range[0], slice_range[1] + 1):
                         status_text.text(f"Analyzing slice {i+1} of {volume.shape[0]}...")
                         
                         slice_img = volume[i]
                         
-                        # Normalize
-                        if slice_img.max() > 1.0:
-                            slice_img = slice_img / 255.0
-                        
                         # Segment
-                        nodules, _ = segment_image(model, slice_img)
+                        nodules, _ = segment_nodule(model, slice_img)
                         
                         for nodule in nodules:
                             # Convert to physical units if spacing available
@@ -578,12 +669,12 @@ CLINICAL RECOMMENDATIONS:
                                 'Centroid Y': f"{nodule['centroid_y']:.0f}"
                             })
                         
-                        progress_bar.progress((i - slice_range[0] + 1) / (slice_range[1] - slice_range[0] + 1))
+                        progress_bar.progress((i - slice_range[0] + 1) / total_slices)
                     
                     status_text.text("Analysis complete!")
                     
                     if all_nodules:
-                        st.markdown(f'<div class="success-box">✅ <strong>{len(all_nodules)} nodules detected</strong> across {slice_range[1] - slice_range[0] + 1} slices</div>', unsafe_allow_html=True)
+                        st.markdown(f'<div class="success-box">✅ <strong>{len(all_nodules)} nodules detected</strong> across {total_slices} slices</div>', unsafe_allow_html=True)
                         
                         # Display results
                         df = pd.DataFrame(all_nodules)
