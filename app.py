@@ -9,6 +9,8 @@ import os
 import gdown
 from skimage.transform import resize
 from skimage.measure import label, regionprops
+from skimage.filters import threshold_otsu
+from skimage.morphology import area_opening, remove_small_objects
 import tempfile
 import SimpleITK as sitk
 from collections import OrderedDict
@@ -16,6 +18,7 @@ from PIL import Image
 import warnings
 from datetime import datetime
 import zipfile
+import hashlib
 
 warnings.filterwarnings('ignore')
 
@@ -156,6 +159,161 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# ========== LUNG CT VALIDATION FUNCTIONS ==========
+
+def is_lung_ct_slice(image_array):
+    """
+    Validate if an image is a lung CT slice using multiple criteria
+    """
+    validation_results = {
+        'is_lung': False,
+        'confidence': 0.0,
+        'reasons': [],
+        'fail_reasons': []
+    }
+    
+    try:
+        # Ensure 2D array
+        if len(image_array.shape) > 2:
+            image_array = image_array[:, :, 0]
+        
+        # Calculate basic statistics
+        img_min = image_array.min()
+        img_max = image_array.max()
+        img_mean = image_array.mean()
+        img_std = image_array.std()
+        
+        # 1. Check image dimensions (lung CT typically 256x256 to 1024x1024)
+        h, w = image_array.shape[:2]
+        if 200 <= h <= 2048 and 200 <= w <= 2048:
+            validation_results['reasons'].append(f"✓ Dimensions: {h}×{w}")
+        else:
+            validation_results['fail_reasons'].append(f"✗ Invalid dimensions: {h}×{w} (expected 200-2048)")
+            return validation_results
+        
+        # 2. Check intensity distribution (lung CT has specific HU range characteristics)
+        # Lung window typically -1000 to 400 HU, translates to ~0-1 range after normalization
+        if 0.0 <= img_min <= 0.1 and 0.8 <= img_max <= 1.0:
+            validation_results['reasons'].append(f"✓ Intensity range: [{img_min:.2f}, {img_max:.2f}]")
+        elif img_min >= 0 and img_max <= 255:
+            # Possibly 8-bit image that hasn't been normalized
+            validation_results['reasons'].append(f"⚠ Intensity range: [{img_min:.0f}, {img_max:.0f}] (will normalize)")
+        else:
+            validation_results['fail_reasons'].append(f"✗ Unusual intensity range: [{img_min:.2f}, {img_max:.2f}]")
+        
+        # 3. Check for lung-like texture (moderate standard deviation)
+        # Lung tissue has moderate variation due to air spaces and vessels
+        if 0.05 <= img_std <= 0.35:
+            validation_results['reasons'].append(f"✓ Texture complexity (std={img_std:.3f})")
+        else:
+            validation_results['fail_reasons'].append(f"✗ Unusual texture (std={img_std:.3f})")
+        
+        # 4. Check for dark lung regions (air-filled lungs should have lower intensity)
+        # Calculate percentile to find dark regions (air in lungs)
+        dark_pixels = np.percentile(image_array, 20)  # Bottom 20% intensity
+        bright_pixels = np.percentile(image_array, 80)  # Top 20% intensity
+        
+        if dark_pixels < 0.4:  # Dark regions (air) should be present
+            validation_results['reasons'].append(f"✓ Dark regions detected (20th percentile={dark_pixels:.3f})")
+        else:
+            validation_results['fail_reasons'].append(f"✗ Missing dark lung regions")
+        
+        # 5. Check for anatomical structure (two lung fields)
+        # Use Otsu threshold to find potential lung regions
+        try:
+            threshold = threshold_otsu(image_array)
+            binary = image_array > threshold
+            
+            # Remove small objects and find connected components
+            cleaned = remove_small_objects(binary, min_size=500)
+            labeled = label(cleaned)
+            
+            # Count major regions (should be 2 for lungs, or 2-3 including mediastinum)
+            region_count = len(np.unique(labeled)) - 1
+            
+            if 1 <= region_count <= 4:
+                validation_results['reasons'].append(f"✓ Anatomical regions detected: {region_count}")
+            else:
+                validation_results['fail_reasons'].append(f"✗ Unexpected region count: {region_count}")
+        except:
+            pass
+        
+        # 6. Check edge characteristics (lung CT has distinct boundaries)
+        from scipy import ndimage
+        edges = np.abs(ndimage.sobel(image_array))
+        edge_density = np.mean(edges > np.percentile(edges, 90))
+        
+        if 0.05 <= edge_density <= 0.30:
+            validation_results['reasons'].append(f"✓ Edge density appropriate ({edge_density:.3f})")
+        else:
+            validation_results['fail_reasons'].append(f"✗ Unusual edge density ({edge_density:.3f})")
+        
+        # Calculate confidence score (number of passed criteria / total criteria)
+        total_criteria = 5  # Main criteria
+        passed = len(validation_results['reasons']) - 1  # Subtract the warning count
+        validation_results['confidence'] = min(passed / total_criteria, 1.0)
+        
+        # Determine if it's likely a lung CT
+        if passed >= 3:
+            validation_results['is_lung'] = True
+            validation_results['reasons'].append(f"✓ Lung CT confidence: {validation_results['confidence']:.1%}")
+        else:
+            validation_results['is_lung'] = False
+            
+        return validation_results
+        
+    except Exception as e:
+        validation_results['fail_reasons'].append(f"✗ Validation error: {str(e)}")
+        return validation_results
+
+def validate_full_ct_volume(image_volume):
+    """
+    Validate full 3D CT volume
+    """
+    validation_results = {
+        'is_lung': False,
+        'confidence': 0.0,
+        'reasons': [],
+        'fail_reasons': []
+    }
+    
+    try:
+        # Check dimensions (typical lung CT: 100-500 slices)
+        num_slices, height, width = image_volume.shape
+        
+        if 50 <= num_slices <= 1000:
+            validation_results['reasons'].append(f"✓ Volume depth: {num_slices} slices")
+        else:
+            validation_results['fail_reasons'].append(f"✗ Unusual slice count: {num_slices}")
+            return validation_results
+        
+        # Sample slices to validate
+        sample_indices = [0, num_slices//4, num_slices//2, 3*num_slices//4, num_slices-1]
+        lung_slice_count = 0
+        
+        for idx in sample_indices:
+            slice_img = image_volume[idx]
+            # Normalize if needed
+            if slice_img.max() > 1.0:
+                slice_img = slice_img / 255.0
+            
+            result = is_lung_ct_slice(slice_img)
+            if result['is_lung']:
+                lung_slice_count += 1
+        
+        # If majority of sampled slices are lung-like
+        if lung_slice_count >= 3:
+            validation_results['is_lung'] = True
+            validation_results['confidence'] = lung_slice_count / len(sample_indices)
+            validation_results['reasons'].append(f"✓ {lung_slice_count}/{len(sample_indices)} slices validated as lung CT")
+        else:
+            validation_results['fail_reasons'].append(f"✗ Only {lung_slice_count}/{len(sample_indices)} slices appear lung-like")
+            
+    except Exception as e:
+        validation_results['fail_reasons'].append(f"✗ Volume validation error: {str(e)}")
+    
+    return validation_results
+
 # ========== GOOGLE DRIVE SETUP ==========
 GOOGLE_DRIVE_FILE_ID = "1PzCv2fJSr7e0QIfPGtLKLOL-9RSLdR2i"
 MODEL_FILENAME = "best_model(1).pth"
@@ -172,6 +330,8 @@ def download_and_load_model():
         
         # Load model - using the same architecture as training
         model = MemoryEfficientUNet(n_channels=1, n_classes=1)
+        
+        # Load checkpoint
         checkpoint = torch.load(MODEL_FILENAME, map_location='cpu')
         
         # Handle different checkpoint formats
@@ -200,7 +360,6 @@ def download_and_load_model():
         
     except Exception as e:
         st.error(f"Model Error: {str(e)}")
-        st.error("Make sure the model file is the correct format from your training.")
         return None, False
 
 # ========== MEMORY EFFICIENT U-NET (MATCHING YOUR TRAINING) ==========
@@ -288,55 +447,91 @@ class MemoryEfficientUNet(nn.Module):
         return logits
 
 # ========== IMAGE PROCESSING FUNCTIONS ==========
+def load_and_preprocess_image(uploaded_file):
+    """Load image and ensure it's in correct format"""
+    try:
+        # Open image
+        image = Image.open(uploaded_file)
+        
+        # Convert to grayscale if needed
+        if image.mode != 'L':
+            image = image.convert('L')
+        
+        # Convert to numpy array
+        image_array = np.array(image, dtype=np.float32)
+        
+        # Ensure 2D array (remove any extra dimensions)
+        if len(image_array.shape) > 2:
+            image_array = image_array[:, :, 0]
+        
+        # Normalize to [0, 1] range
+        if image_array.max() > 1.0:
+            image_array = image_array / 255.0
+        
+        return image_array, True
+    
+    except Exception as e:
+        st.error(f"Error loading image: {str(e)}")
+        return None, False
+
 def normalize_ct_image(image_array):
     """Apply lung window normalization [-1000, 400] HU"""
-    # If image is 0-255 range (typical PNG)
-    if image_array.max() > 1.0:
-        image_hu = (image_array / 255.0) * 1400 - 1000
-    else:
-        image_hu = image_array * 1400 - 1000
+    # Convert from [0,1] range to HU range approximation
+    image_hu = image_array * 1400 - 1000
     
+    # Clip to lung window
     image_hu = np.clip(image_hu, -1000, 400)
+    
+    # Normalize back to [0,1] for model input
     normalized = (image_hu + 1000) / 1400
+    
     return normalized
 
 def segment_nodule(model, image_array):
     """Run segmentation on a single image"""
-    # Normalize
-    normalized = normalize_ct_image(image_array)
+    try:
+        # Ensure image is 2D
+        if len(image_array.shape) > 2:
+            image_array = image_array[:, :, 0]
+        
+        # Normalize CT window
+        normalized = normalize_ct_image(image_array)
+        
+        # Resize to 512x512 (model expects 512x512)
+        resized = resize(normalized, (512, 512), preserve_range=True)
+        
+        # Convert to tensor
+        input_tensor = torch.FloatTensor(resized).unsqueeze(0).unsqueeze(0)
+        
+        # Run model
+        with torch.no_grad():
+            output = model(input_tensor)
+            probs = torch.sigmoid(output)
+            mask = (probs > 0.5).float().squeeze().numpy()
+        
+        # Resize back to original dimensions
+        mask_original = resize(mask, image_array.shape, order=0, preserve_range=True)
+        
+        # Find connected components
+        labeled_mask = label(mask_original > 0.5)
+        
+        detections = []
+        if labeled_mask.max() > 0:
+            props = regionprops(labeled_mask)
+            for region in props:
+                if region.area >= 20:  # Minimum nodule size
+                    detections.append({
+                        'area': region.area,
+                        'mask': (labeled_mask == region.label).astype(np.float32),
+                        'bbox': region.bbox,
+                        'centroid': region.centroid,
+                    })
+        
+        return detections, mask_original
     
-    # Resize to 512x512 (model expects 512x512)
-    resized = resize(normalized, (512, 512), preserve_range=True)
-    
-    # Convert to tensor
-    input_tensor = torch.FloatTensor(resized).unsqueeze(0).unsqueeze(0)
-    
-    # Run model
-    with torch.no_grad():
-        output = model(input_tensor)
-        probs = torch.sigmoid(output)
-        mask = (probs > 0.5).float().squeeze().numpy()
-    
-    # Resize back to original dimensions
-    mask_original = resize(mask, image_array.shape[:2], order=0, preserve_range=True)
-    
-    # Find connected components
-    labeled_mask = label(mask_original > 0.5)
-    
-    detections = []
-    if labeled_mask.max() > 0:
-        props = regionprops(labeled_mask)
-        for region in props:
-            if region.area >= 20:  # Minimum nodule size
-                detections.append({
-                    'area': region.area,
-                    'mask': (labeled_mask == region.label).astype(np.float32),
-                    'bbox': region.bbox,
-                    'centroid': region.centroid,
-                    'min_intensity': region.min_intensity if hasattr(region, 'min_intensity') else None
-                })
-    
-    return detections, mask_original
+    except Exception as e:
+        st.error(f"Segmentation error: {str(e)}")
+        return [], None
 
 def load_mhd_raw(mhd_bytes, raw_bytes):
     """Load and parse MHD + RAW files"""
@@ -456,87 +651,121 @@ def main():
         )
         
         if uploaded_file:
-            # Load and display image
-            image = Image.open(uploaded_file)
-            if image.mode != 'L':
-                image = image.convert('L')
-            image_array = np.array(image, dtype=np.float32)
+            # Load and preprocess image
+            image_array, success = load_and_preprocess_image(uploaded_file)
             
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.markdown('<div class="clinical-card">', unsafe_allow_html=True)
-                st.image(image_array, caption="Original CT Slice", use_container_width=True)
-                st.markdown(f"*Dimensions: {image_array.shape[1]}×{image_array.shape[0]}*")
-                st.markdown('</div>', unsafe_allow_html=True)
-            
-            with col2:
-                st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-                st.metric("Image Size", f"{image_array.shape[1]}×{image_array.shape[0]}")
-                st.metric("Format", uploaded_file.type.upper())
-                st.markdown('</div>', unsafe_allow_html=True)
-            
-            # Load model
-            with st.spinner("Loading AI Model..."):
-                model, success = download_and_load_model()
-            
-            if success and st.button("🔍 Run Analysis", type="primary"):
-                with st.spinner("AI Analyzing..."):
-                    detections, mask = segment_nodule(model, image_array)
+            if success and image_array is not None:
+                # Validate if it's a lung CT
+                with st.spinner("Validating image..."):
+                    validation = is_lung_ct_slice(image_array)
                 
-                if detections:
-                    st.markdown(f'<div class="success-box">✅ <strong>{len(detections)} nodule(s) detected</strong></div>', unsafe_allow_html=True)
+                if not validation['is_lung']:
+                    st.markdown('<div class="warning-box">', unsafe_allow_html=True)
+                    st.error("❌ **INVALID IMAGE TYPE**")
+                    st.markdown("This system is designed **exclusively for lung CT scans**.")
                     
-                    for idx, d in enumerate(detections):
-                        st.markdown(f'<div class="clinical-card">', unsafe_allow_html=True)
-                        st.markdown(f"#### Nodule {idx+1}")
-                        
-                        col_a, col_b = st.columns(2)
-                        
-                        with col_a:
-                            # Create overlay
-                            img_norm = (image_array - image_array.min()) / (image_array.max() - image_array.min() + 1e-8)
-                            overlay = np.stack([img_norm] * 3, axis=-1)
-                            overlay[:, :, 0] = np.where(d['mask'] > 0.5, 1.0, overlay[:, :, 0])
-                            overlay[:, :, 1] = np.where(d['mask'] > 0.5, 0.0, overlay[:, :, 1])
-                            overlay[:, :, 2] = np.where(d['mask'] > 0.5, 0.0, overlay[:, :, 2])
-                            st.image(overlay, use_container_width=True)
-                        
-                        with col_b:
-                            st.metric("Area", f"{d['area']:.0f} pixels²")
-                            
-                            if d['area'] < 100:
-                                st.info("📌 **Size:** Small\n**Recommendation:** Routine monitoring")
-                            elif d['area'] < 300:
-                                st.warning("⚠️ **Size:** Medium\n**Recommendation:** Short-term follow-up")
-                            else:
-                                st.error("🚨 **Size:** Large\n**Recommendation:** Urgent consultation")
-                            
-                            st.metric("Centroid (x,y)", f"({d['centroid'][1]:.0f}, {d['centroid'][0]:.0f})")
-                        
-                        st.markdown('</div>', unsafe_allow_html=True)
+                    st.markdown("**Validation failed for the following reasons:**")
+                    for reason in validation['fail_reasons']:
+                        st.markdown(f"- {reason}")
                     
-                    # Generate report
-                    report = f"""LUNG NODULE DETECTION REPORT
+                    st.markdown("---")
+                    st.markdown("**Please upload a valid lung CT slice.** Examples of accepted images:")
+                    st.markdown("- Lung CT scan (any window setting)")
+                    st.markdown("- Coronal, sagittal, or axial lung views")
+                    st.markdown("- DICOM format preferred, but PNG/JPG accepted")
+                    st.markdown('</div>', unsafe_allow_html=True)
+                    return
+                
+                # Show validation success
+                st.markdown('<div class="success-box">', unsafe_allow_html=True)
+                st.markdown("✅ **Lung CT Verified**")
+                for reason in validation['reasons'][:3]:  # Show first 3 validations
+                    st.markdown(reason)
+                st.markdown(f"*Confidence: {validation['confidence']:.1%}*")
+                st.markdown('</div>', unsafe_allow_html=True)
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown('<div class="clinical-card">', unsafe_allow_html=True)
+                    st.image(image_array, caption="Original CT Slice", use_container_width=True, clamp=True)
+                    st.markdown(f"*Dimensions: {image_array.shape[1]}×{image_array.shape[0]}*")
+                    st.markdown('</div>', unsafe_allow_html=True)
+                
+                with col2:
+                    st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+                    st.metric("Image Size", f"{image_array.shape[1]}×{image_array.shape[0]}")
+                    st.metric("Format", uploaded_file.type.upper() if uploaded_file.type else "IMAGE")
+                    st.metric("Lung CT Confidence", f"{validation['confidence']:.1%}")
+                    st.markdown('</div>', unsafe_allow_html=True)
+                
+                # Load model
+                with st.spinner("Loading AI Model..."):
+                    model, success = download_and_load_model()
+                
+                if success and st.button("🔍 Run Analysis", type="primary"):
+                    with st.spinner("AI Analyzing..."):
+                        detections, mask = segment_nodule(model, image_array)
+                    
+                    if detections and len(detections) > 0:
+                        st.markdown(f'<div class="success-box">✅ <strong>{len(detections)} nodule(s) detected</strong></div>', unsafe_allow_html=True)
+                        
+                        for idx, d in enumerate(detections):
+                            st.markdown(f'<div class="clinical-card">', unsafe_allow_html=True)
+                            st.markdown(f"#### Nodule {idx+1}")
+                            
+                            col_a, col_b = st.columns(2)
+                            
+                            with col_a:
+                                # Create overlay
+                                overlay = np.stack([image_array] * 3, axis=-1)
+                                # Normalize for display
+                                overlay = (overlay - overlay.min()) / (overlay.max() - overlay.min() + 1e-8)
+                                # Apply red mask for nodule
+                                overlay[:, :, 0] = np.where(d['mask'] > 0.5, 1.0, overlay[:, :, 0])
+                                overlay[:, :, 1] = np.where(d['mask'] > 0.5, 0.0, overlay[:, :, 1])
+                                overlay[:, :, 2] = np.where(d['mask'] > 0.5, 0.0, overlay[:, :, 2])
+                                st.image(overlay, caption=f"Nodule {idx+1} Overlay", use_container_width=True, clamp=True)
+                            
+                            with col_b:
+                                st.metric("Area", f"{d['area']:.0f} pixels²")
+                                
+                                if d['area'] < 100:
+                                    st.info("📌 **Size:** Small\n**Recommendation:** Routine monitoring")
+                                elif d['area'] < 300:
+                                    st.warning("⚠️ **Size:** Medium\n**Recommendation:** Short-term follow-up")
+                                else:
+                                    st.error("🚨 **Size:** Large\n**Recommendation:** Urgent consultation")
+                                
+                                if len(d['centroid']) >= 2:
+                                    st.metric("Centroid (x,y)", f"({d['centroid'][1]:.0f}, {d['centroid'][0]:.0f})")
+                            
+                            st.markdown('</div>', unsafe_allow_html=True)
+                        
+                        # Generate report
+                        report = f"""LUNG NODULE DETECTION REPORT
 {'='*50}
 Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 Image Dimensions: {image_array.shape[1]}×{image_array.shape[0]}
+Validation Confidence: {validation['confidence']:.1%}
 Nodules Detected: {len(detections)}
 
 DETAILS:
 """
-                    for idx, d in enumerate(detections):
-                        report += f"""
+                        for idx, d in enumerate(detections):
+                            report += f"""
 Nodule {idx+1}:
   - Area: {d['area']:.0f} pixels²
   - Location (x,y): ({d['centroid'][1]:.0f}, {d['centroid'][0]:.0f})
   - Recommendation: {'Routine monitoring' if d['area'] < 100 else 'Short-term follow-up' if d['area'] < 300 else 'Urgent consultation'}
 """
-                    
-                    st.download_button("📊 Download Clinical Report", report, f"nodule_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
-                    
-                else:
-                    st.markdown('<div class="info-box">✓ No nodules detected in this slice</div>', unsafe_allow_html=True)
+                        
+                        st.download_button("📊 Download Clinical Report", report, f"nodule_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+                        
+                    else:
+                        st.markdown('<div class="info-box">✓ No nodules detected in this slice</div>', unsafe_allow_html=True)
+            else:
+                st.error("Could not load image. Please try a different file.")
     
     else:
         st.markdown('<div class="info-box">📌 <strong>Full CT Analysis:</strong> Upload a ZIP file containing both MHD and RAW files for volumetric analysis.</div>', unsafe_allow_html=True)
@@ -556,7 +785,6 @@ Nodule {idx+1}:
                     f.write(uploaded_zip.getbuffer())
                 
                 # Extract
-                import zipfile
                 with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                     zip_ref.extractall(tmpdir)
                 
@@ -573,19 +801,46 @@ Nodule {idx+1}:
                 if mhd_file and raw_file:
                     st.success(f"Found: {os.path.basename(mhd_file)} and {os.path.basename(raw_file)}")
                     
-                    # Load and display info
+                    # Load and validate volume
                     img = sitk.ReadImage(mhd_file)
                     array = sitk.GetArrayFromImage(img)
+                    
+                    # Normalize array
+                    if array.max() > 1.0:
+                        array = array / 255.0
+                    
+                    # Validate volume
+                    with st.spinner("Validating CT volume..."):
+                        validation = validate_full_ct_volume(array)
+                    
+                    if not validation['is_lung']:
+                        st.markdown('<div class="warning-box">', unsafe_allow_html=True)
+                        st.error("❌ **INVALID VOLUME TYPE**")
+                        st.markdown("This system is designed **exclusively for lung CT volumes**.")
+                        
+                        for reason in validation['fail_reasons']:
+                            st.markdown(f"- {reason}")
+                        
+                        st.markdown('</div>', unsafe_allow_html=True)
+                        return
+                    
+                    st.markdown('<div class="success-box">', unsafe_allow_html=True)
+                    st.markdown("✅ **Lung CT Volume Verified**")
+                    for reason in validation['reasons']:
+                        st.markdown(reason)
+                    st.markdown(f"*Confidence: {validation['confidence']:.1%}*")
+                    st.markdown('</div>', unsafe_allow_html=True)
                     
                     st.markdown('<div class="metric-card">', unsafe_allow_html=True)
                     st.metric("Volume Dimensions", f"{array.shape[0]} × {array.shape[1]} × {array.shape[2]}")
                     st.metric("Spacing", f"{img.GetSpacing()[0]:.2f}mm")
+                    st.metric("Validation Confidence", f"{validation['confidence']:.1%}")
                     st.markdown('</div>', unsafe_allow_html=True)
                     
-                    # Display first and last slice for preview
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.image(array[array.shape[0]//2], caption="Middle Slice Preview", use_container_width=True)
+                    # Display middle slice for preview
+                    middle_slice = array[array.shape[0]//2]
+                    middle_slice_norm = (middle_slice - middle_slice.min()) / (middle_slice.max() - middle_slice.min() + 1e-8)
+                    st.image(middle_slice_norm, caption="Middle Slice Preview", use_container_width=True, clamp=True)
                     
                     if st.button("🔍 Analyze Full Volume", type="primary"):
                         st.info("Full 3D volumetric analysis processing...")
@@ -602,18 +857,16 @@ Nodule {idx+1}:
                                 status_text.text(f"Processing slice {i+1}/{array.shape[0]}")
                                 slice_img = array[i]
                                 
-                                # Normalize
-                                slice_normalized = (slice_img - slice_img.min()) / (slice_img.max() - slice_img.min() + 1e-8)
-                                
                                 # Segment
-                                detections, _ = segment_nodule(model, slice_normalized)
+                                detections, _ = segment_nodule(model, slice_img)
                                 
                                 if detections:
                                     for d in detections:
                                         detections_all.append({
                                             'slice': i,
                                             'area': d['area'],
-                                            'centroid': d['centroid']
+                                            'centroid_x': d['centroid'][1],
+                                            'centroid_y': d['centroid'][0]
                                         })
                                 
                                 progress_bar.progress((i + 1) / array.shape[0])
@@ -628,6 +881,10 @@ Nodule {idx+1}:
                                 import pandas as pd
                                 df = pd.DataFrame(detections_all)
                                 st.dataframe(df, use_container_width=True)
+                                
+                                # Download results
+                                csv = df.to_csv(index=False)
+                                st.download_button("📊 Download Results CSV", csv, "nodule_detections.csv")
                             else:
                                 st.markdown('<div class="info-box">✓ No nodules detected in this volume</div>', unsafe_allow_html=True)
                 else:
