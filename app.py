@@ -67,18 +67,28 @@ st.markdown("""
         font-weight: 500;
         width: 100%;
     }
-    /* Fix for metric cards */
-    .stMetric {
-        background-color: #f8f9fa;
-        padding: 10px;
-        border-radius: 8px;
+    /* Fix for metric cards text */
+    .stMetric label {
+        color: #1a1a1a !important;
+        font-weight: 600 !important;
     }
-    /* Make sure all text is visible */
-    .stMarkdown {
-        color: #1a1a1a;
+    .stMetric div {
+        color: #1a1a1a !important;
     }
+    /* Fix for dataframes */
     .stDataFrame {
         background-color: white;
+    }
+    /* Fix for selectbox */
+    .stSelectbox label {
+        color: #1a1a1a !important;
+    }
+    /* General text color */
+    p, li, span, div {
+        color: #1a1a1a;
+    }
+    h1, h2, h3, h4, h5, h6 {
+        color: #1a1a1a;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -242,30 +252,29 @@ def segment_nodule(model, image_array):
 
 def load_volume_fast(zip_file):
     """Load CT volume from ZIP with progress"""
-    with st.spinner("Extracting volume..."):
-        temp_dir = tempfile.mkdtemp()
-        zip_path = os.path.join(temp_dir, "upload.zip")
-        
-        with open(zip_path, "wb") as f:
-            f.write(zip_file.getbuffer())
-        
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall(temp_dir)
-        
-        mhd_file = None
-        raw_file = None
-        
-        for file in os.listdir(temp_dir):
-            if file.endswith('.mhd'):
-                mhd_file = os.path.join(temp_dir, file)
-            elif file.endswith('.raw'):
-                raw_file = os.path.join(temp_dir, file)
-        
-        if mhd_file and raw_file:
-            img = sitk.ReadImage(mhd_file)
-            volume = sitk.GetArrayFromImage(img)
-            spacing = img.GetSpacing()
-            return volume, spacing, temp_dir
+    temp_dir = tempfile.mkdtemp()
+    zip_path = os.path.join(temp_dir, "upload.zip")
+    
+    with open(zip_path, "wb") as f:
+        f.write(zip_file.getbuffer())
+    
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extractall(temp_dir)
+    
+    mhd_file = None
+    raw_file = None
+    
+    for file in os.listdir(temp_dir):
+        if file.endswith('.mhd'):
+            mhd_file = os.path.join(temp_dir, file)
+        elif file.endswith('.raw'):
+            raw_file = os.path.join(temp_dir, file)
+    
+    if mhd_file and raw_file:
+        img = sitk.ReadImage(mhd_file)
+        volume = sitk.GetArrayFromImage(img)
+        spacing = img.GetSpacing()
+        return volume, spacing, temp_dir
     
     return None, None, None
 
@@ -396,7 +405,8 @@ def main():
         if uploaded_zip:
             if st.button("🔍 Analyze Full Volume", type="primary"):
                 # Load volume
-                volume, spacing, temp_dir = load_volume_fast(uploaded_zip)
+                with st.spinner("Loading volume..."):
+                    volume, spacing, temp_dir = load_volume_fast(uploaded_zip)
                 
                 if volume is not None:
                     st.success(f"✅ Volume loaded: {volume.shape[0]} slices, {volume.shape[1]}×{volume.shape[2]}")
@@ -417,7 +427,7 @@ def main():
                         
                         if nodules:
                             slices_with_nodules[i] = {
-                                'image': volume[i],
+                                'image': volume[i].copy(),  # Make a copy to preserve original
                                 'nodules': nodules
                             }
                             
@@ -444,30 +454,56 @@ def main():
                     if all_nodules:
                         st.markdown(f'<div class="success-box">✅ <strong>{len(all_nodules)} Nodule(s) Detected</strong> across {len(slices_with_nodules)} slices</div>', unsafe_allow_html=True)
                         
-                        # Show overlay for slices with nodules
+                        # Summary statistics - using st.metric which we fixed with CSS
+                        st.markdown("### 📈 Summary Statistics")
+                        col1, col2, col3 = st.columns(3)
+                        
+                        with col1:
+                            st.metric("**Total Nodules**", len(all_nodules))
+                        with col2:
+                            areas = [n['Area (px²)'] for n in all_nodules]
+                            st.metric("**Average Area**", f"{np.mean(areas):.0f} px²")
+                        with col3:
+                            if spacing:
+                                diameters = [float(n['Diameter (mm)']) for n in all_nodules]
+                                st.metric("**Largest Nodule**", f"{max(diameters):.1f} mm")
+                            else:
+                                st.metric("**Largest Nodule**", f"{max(areas):.0f} px²")
+                        
+                        # Show overlay for slices with nodules - store in session state to persist
                         if slices_with_nodules:
                             st.markdown("### 🔍 Visual Results")
                             
-                            # Let user select which slice to view
+                            # Create a unique key for the selectbox
                             slice_numbers = sorted(slices_with_nodules.keys())
+                            
+                            # Initialize session state for selected slice if not exists
+                            if 'selected_slice' not in st.session_state:
+                                st.session_state.selected_slice = slice_numbers[0]
+                            
+                            # Selectbox with callback to update session state
                             selected_slice = st.selectbox(
                                 "Select slice to view:",
                                 slice_numbers,
-                                format_func=lambda x: f"Slice {x} ({len(slices_with_nodules[x]['nodules'])} nodules)"
+                                format_func=lambda x: f"Slice {x} ({len(slices_with_nodules[x]['nodules'])} nodules)",
+                                key='slice_selector'
                             )
                             
+                            # Update session state
+                            st.session_state.selected_slice = selected_slice
+                            
                             # Display overlay for selected slice
-                            selected_data = slices_with_nodules[selected_slice]
+                            selected_data = slices_with_nodules[st.session_state.selected_slice]
                             overlay = create_overlay(selected_data['image'], selected_data['nodules'])
                             
                             fig, ax = plt.subplots(figsize=(8, 8))
                             ax.imshow(overlay)
-                            ax.set_title(f"Slice {selected_slice} - {len(selected_data['nodules'])} Nodule(s)")
+                            ax.set_title(f"Slice {st.session_state.selected_slice} - {len(selected_data['nodules'])} Nodule(s)")
                             ax.axis('off')
                             st.pyplot(fig)
                             
                             # Show individual nodule details for this slice
-                            st.markdown(f"**📊 Nodules in Slice {selected_slice}:**")
+                            st.markdown(f"**📊 Nodules in Slice {st.session_state.selected_slice}:**")
                             for n in selected_data['nodules']:
                                 if spacing:
                                     diam_mm = n['diameter_pixels'] * spacing[0]
@@ -482,21 +518,6 @@ def main():
                         st.markdown("### 📊 All Detections")
                         df = pd.DataFrame(all_nodules)
                         st.dataframe(df, use_container_width=True)
-                        
-                        # Summary statistics
-                        st.markdown("### 📈 Summary Statistics")
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            st.metric("Total Nodules", len(all_nodules))
-                        with col2:
-                            areas = [n['Area (px²)'] for n in all_nodules]
-                            st.metric("Average Area", f"{np.mean(areas):.0f} px²")
-                        with col3:
-                            if spacing:
-                                diameters = [float(n['Diameter (mm)']) for n in all_nodules]
-                                st.metric("Largest Nodule", f"{max(diameters):.1f} mm")
-                            else:
-                                st.metric("Largest Nodule", f"{max(areas):.0f} px²")
                         
                         # Clinical Recommendations
                         st.markdown("### 🩺 Clinical Recommendations")
