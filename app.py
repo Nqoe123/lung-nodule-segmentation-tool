@@ -26,67 +26,56 @@ st.set_page_config(
     layout="wide"
 )
 
-# ========== SIMPLE CSS - ALL TEXT BLACK ==========
+# ========== CLEAN CSS ==========
 st.markdown("""
 <style>
-    /* Force all text to be black */
-    .stMarkdown, .stMarkdown p, .stMarkdown div, .stMarkdown span,
-    .stMetric label, .stMetric div, .stMetric span,
-    .stDataFrame, .stDataFrame div, .stDataFrame span,
-    .stSelectbox label, .stSelectbox div,
-    p, li, div, span, label, h1, h2, h3, h4, h5, h6 {
-        color: #000000 !important;
+    .clinical-header {
+        background: linear-gradient(135deg, #1e3a5f 0%, #2c5282 100%);
+        padding: 1.8rem;
+        border-radius: 12px;
+        margin-bottom: 2rem;
+        text-align: center;
+        color: white;
     }
-    
-    /* Header stays white on blue */
-    .clinical-header, .clinical-header h1, .clinical-header p, .clinical-header small {
+    .clinical-header h1, .clinical-header p, .clinical-header small {
         color: white !important;
     }
     
-    /* Box styles with black text */
-    .success-box {
-        background: #d4edda;
-        border-left: 4px solid #28a745;
-        padding: 1rem;
-        border-radius: 8px;
-        margin: 1rem 0;
-        color: #000000 !important;
-    }
-    .warning-box {
-        background: #fff3cd;
-        border-left: 4px solid #ffc107;
-        padding: 1rem;
-        border-radius: 8px;
-        margin: 1rem 0;
-        color: #000000 !important;
-    }
-    .info-box {
-        background: #d1ecf1;
-        border-left: 4px solid #17a2b8;
-        padding: 1rem;
-        border-radius: 8px;
-        margin: 1rem 0;
-        color: #000000 !important;
+    /* Make all regular text dark gray for readability */
+    p, li, span, div, label {
+        color: #2d3748 !important;
     }
     
+    /* Headers dark */
+    h1, h2, h3, h4, h5, h6 {
+        color: #1a202c !important;
+    }
+    
+    /* Metric cards - light background with dark text */
+    div[data-testid="stMetric"] {
+        background-color: #f7fafc;
+        padding: 15px;
+        border-radius: 10px;
+        border: 1px solid #e2e8f0;
+    }
+    div[data-testid="stMetric"] label, 
+    div[data-testid="stMetric"] div {
+        color: #2d3748 !important;
+    }
+    
+    /* Buttons */
     .stButton > button {
         background-color: #2c5282;
         color: white !important;
         font-weight: 500;
-        width: 100%;
-    }
-    
-    /* Metric cards */
-    div[data-testid="stMetric"] {
-        background-color: #f0f2f6;
-        padding: 10px;
-        border-radius: 8px;
     }
     
     /* Dataframe */
-    .dataframe {
-        color: #000000 !important;
+    .stDataFrame {
+        background-color: white;
     }
+    
+    /* Success/Warning/Info boxes from Streamlit - text is automatically readable */
 </style>
 """, unsafe_allow_html=True)
 
@@ -174,7 +163,7 @@ MODEL_FILENAME = "best_model.pth"
 def load_model():
     try:
         if not os.path.exists(MODEL_FILENAME):
-            with st.spinner("Loading AI model..."):
+            with st.spinner("Downloading AI model..."):
                 url = f"https://drive.google.com/uc?id={GOOGLE_DRIVE_FILE_ID}"
                 gdown.download(url, MODEL_FILENAME, quiet=True)
         
@@ -307,7 +296,8 @@ def main():
             st.session_state.authenticated = False
             st.rerun()
         st.markdown("---")
-        st.markdown("**Model:** U-Net (Dice 0.74)")
+        st.markdown("**Model:** U-Net")
+        st.markdown("**Dice Score:** 0.74")
         st.markdown("**Training:** LUNA16")
     
     model = load_model()
@@ -325,42 +315,49 @@ def main():
             image = Image.open(uploaded_file).convert('L')
             image_array = np.array(image, dtype=np.float32)
             
-            fig, ax = plt.subplots(figsize=(6, 6))
-            ax.imshow(image_array, cmap='gray')
-            ax.set_title("Original CT Slice")
-            ax.axis('off')
-            st.pyplot(fig)
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                fig, ax = plt.subplots(figsize=(5, 5))
+                ax.imshow(image_array, cmap='gray')
+                ax.set_title("Original CT Slice")
+                ax.axis('off')
+                st.pyplot(fig)
             
             if st.button("🔍 Detect Nodules", type="primary"):
                 with st.spinner("Analyzing..."):
                     nodules, _ = segment_nodule(model, image_array)
                 
                 if nodules:
-                    overlay = create_overlay(image_array, nodules)
-                    fig2, ax2 = plt.subplots(figsize=(6, 6))
-                    ax2.imshow(overlay)
-                    ax2.set_title(f"{len(nodules)} Nodule(s) Detected")
-                    ax2.axis('off')
-                    st.pyplot(fig2)
+                    with col2:
+                        overlay = create_overlay(image_array, nodules)
+                        fig2, ax2 = plt.subplots(figsize=(5, 5))
+                        ax2.imshow(overlay)
+                        ax2.set_title(f"{len(nodules)} Nodule(s) Detected")
+                        ax2.axis('off')
+                        st.pyplot(fig2)
                     
-                    # Results
                     st.markdown(f"### ✅ {len(nodules)} Nodule(s) Detected")
                     
                     for n in nodules:
-                        st.markdown(f"**Nodule {n['id']}:**")
-                        st.write(f"- Area: {n['area_pixels']:.0f} pixels²")
-                        st.write(f"- Diameter: {n['diameter_pixels']:.1f} pixels")
-                        st.write(f"- Location: ({n['centroid_x']:.0f}, {n['centroid_y']:.0f})")
-                        
-                        if n['area_pixels'] < 100:
-                            st.info("📌 Recommendation: Routine follow-up in 12 months")
-                        elif n['area_pixels'] < 300:
-                            st.warning("⚠️ Recommendation: Short-term follow-up in 6 months")
-                        else:
-                            st.error("🚨 Recommendation: Urgent consultation recommended")
-                        st.markdown("---")
+                        with st.container():
+                            st.markdown(f"**Nodule {n['id']}**")
+                            col_a, col_b = st.columns(2)
+                            with col_a:
+                                st.write(f"📐 Area: {n['area_pixels']:.0f} pixels²")
+                                st.write(f"📏 Diameter: {n['diameter_pixels']:.1f} pixels")
+                            with col_b:
+                                st.write(f"📍 Location: ({n['centroid_x']:.0f}, {n['centroid_y']:.0f})")
+                            
+                            if n['area_pixels'] < 100:
+                                st.info("📌 **Recommendation:** Routine follow-up in 12 months")
+                            elif n['area_pixels'] < 300:
+                                st.warning("⚠️ **Recommendation:** Short-term follow-up in 6 months")
+                            else:
+                                st.error("🚨 **Recommendation:** Urgent consultation recommended")
+                            st.markdown("---")
                 else:
-                    st.info("✓ No nodules detected")
+                    st.info("✓ No nodules detected in this slice")
     
     else:  # Full CT Volume
         uploaded_zip = st.file_uploader("Choose CT volume (ZIP with .mhd/.raw)", type=["zip"])
@@ -371,16 +368,19 @@ def main():
                     volume, spacing, temp_dir = load_volume(uploaded_zip)
                 
                 if volume is not None:
-                    st.success(f"Volume loaded: {volume.shape[0]} slices")
+                    st.success(f"✅ Volume loaded: {volume.shape[0]} slices, {volume.shape[1]}×{volume.shape[2]} pixels")
                     if spacing:
-                        st.info(f"Pixel spacing: {spacing[0]:.2f} mm")
+                        st.info(f"📏 Pixel spacing: {spacing[0]:.2f} mm")
                     
                     all_nodules = []
                     slices_with_nodules = {}
-                    progress = st.progress(0)
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
                     
                     for i in range(volume.shape[0]):
+                        status_text.text(f"Analyzing slice {i+1}/{volume.shape[0]}...")
                         nodules, _ = segment_nodule(model, volume[i])
+                        
                         if nodules:
                             slices_with_nodules[i] = {
                                 'image': volume[i].copy(),
@@ -399,74 +399,101 @@ def main():
                                     'Area (mm²)': f"{area_mm2:.1f}",
                                     'Diameter (mm)': f"{diam_mm:.1f}"
                                 })
-                        progress.progress((i + 1) / volume.shape[0])
+                        progress_bar.progress((i + 1) / volume.shape[0])
+                    
+                    status_text.text("Analysis complete!")
                     
                     if all_nodules:
-                        st.markdown(f"### ✅ {len(all_nodules)} Nodule(s) Detected")
+                        st.markdown(f"### ✅ {len(all_nodules)} Nodule(s) Detected Across {len(slices_with_nodules)} Slices")
                         
-                        # Summary
+                        # Summary Statistics
+                        st.markdown("#### 📊 Summary Statistics")
                         col1, col2, col3 = st.columns(3)
                         col1.metric("Total Nodules", len(all_nodules))
                         col2.metric("Average Area", f"{np.mean([n['Area (px²)'] for n in all_nodules]):.0f} px²")
                         if spacing:
-                            col3.metric("Largest", f"{max([float(n['Diameter (mm)']) for n in all_nodules]):.1f} mm")
+                            col3.metric("Largest Nodule", f"{max([float(n['Diameter (mm)']) for n in all_nodules]):.1f} mm")
                         
-                        # Visual results
+                        # Visual Results
                         if slices_with_nodules:
-                            st.markdown("### 🔍 View Nodules by Slice")
-                            slice_num = st.selectbox(
-                                "Select slice:",
-                                sorted(slices_with_nodules.keys())
+                            st.markdown("#### 🔍 Visual Results")
+                            
+                            slice_options = sorted(slices_with_nodules.keys())
+                            selected_slice = st.selectbox(
+                                "Select slice to view:",
+                                slice_options,
+                                format_func=lambda x: f"Slice {x} ({len(slices_with_nodules[x]['nodules'])} nodules)"
                             )
                             
-                            data = slices_with_nodules[slice_num]
+                            data = slices_with_nodules[selected_slice]
                             overlay = create_overlay(data['image'], data['nodules'])
                             
                             fig, ax = plt.subplots(figsize=(8, 8))
                             ax.imshow(overlay)
-                            ax.set_title(f"Slice {slice_num} - {len(data['nodules'])} Nodules")
+                            ax.set_title(f"Slice {selected_slice} - {len(data['nodules'])} Nodule(s)")
                             ax.axis('off')
                             st.pyplot(fig)
                             
+                            # Show details for nodules in this slice
+                            st.markdown(f"**Nodules in Slice {selected_slice}:**")
                             for n in data['nodules']:
                                 if spacing:
                                     diam = n['diameter_pixels'] * spacing[0]
                                     area = n['area_pixels'] * (spacing[0] ** 2)
-                                    st.write(f"Nodule {n['id']}: {area:.1f} mm², {diam:.1f} mm")
+                                    st.write(f"• Nodule {n['id']}: {area:.1f} mm², {diam:.1f} mm at ({n['centroid_x']:.0f}, {n['centroid_y']:.0f})")
                                 else:
-                                    st.write(f"Nodule {n['id']}: {n['area_pixels']:.0f} px²")
+                                    st.write(f"• Nodule {n['id']}: {n['area_pixels']:.0f} px² at ({n['centroid_x']:.0f}, {n['centroid_y']:.0f})")
                         
-                        # Data table
-                        st.markdown("### 📊 All Detections")
+                        # Complete Results Table
+                        st.markdown("#### 📋 Complete Results")
                         df = pd.DataFrame(all_nodules)
-                        st.dataframe(df)
+                        st.dataframe(df, use_container_width=True)
                         
-                        # Recommendations
-                        st.markdown("### 🩺 Recommendations")
+                        # Clinical Recommendations
+                        st.markdown("#### 🩺 Clinical Recommendations")
+                        
                         small = [n for n in all_nodules if n['Area (px²)'] < 100]
                         medium = [n for n in all_nodules if 100 <= n['Area (px²)'] < 300]
                         large = [n for n in all_nodules if n['Area (px²)'] >= 300]
                         
                         if small:
-                            st.info(f"📌 Small nodules ({len(small)}): Routine follow-up in 12 months")
+                            st.info(f"📌 **Small Nodules ({len(small)} found)**\n\nSize < 100 pixels²\n\n**Recommendation:** Routine follow-up in 12 months")
                         if medium:
-                            st.warning(f"⚠️ Medium nodules ({len(medium)}): Follow-up in 6 months")
+                            st.warning(f"⚠️ **Medium Nodules ({len(medium)} found)**\n\nSize 100-300 pixels²\n\n**Recommendation:** Short-term follow-up in 6 months")
                         if large:
-                            st.error(f"🚨 Large nodules ({len(large)}): Urgent consultation")
+                            st.error(f"🚨 **Large Nodules ({len(large)} found)**\n\nSize > 300 pixels²\n\n**Recommendation:** Urgent consultation recommended")
                         
-                        # Download
+                        # Download Options
+                        st.markdown("#### 📥 Download Results")
                         csv = df.to_csv(index=False)
-                        st.download_button("📊 Download CSV", csv, f"results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.download_button("📊 Download CSV", csv, f"results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+                        
+                        # Generate report
+                        report = f"""LUNG NODULE DETECTION REPORT
+{'='*60}
+Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Total Nodules: {len(all_nodules)}
+Slices with Nodules: {len(slices_with_nodules)}
+
+DETAILS:
+"""
+                        for n in all_nodules:
+                            report += f"\nSlice {n['Slice']}: {n['Area (px²)']} px², {n['Diameter (mm)']} mm"
+
+                        with col2:
+                            st.download_button("📄 Download Report", report, f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
                     else:
-                        st.info("✓ No nodules detected")
+                        st.info("✓ No nodules detected in this volume")
                     
                     import shutil
                     shutil.rmtree(temp_dir, ignore_errors=True)
                 else:
-                    st.error("Could not load volume")
+                    st.error("Could not load volume. Make sure ZIP contains .mhd and .raw files")
     
     st.markdown("---")
-    st.markdown("<center>LungVision AI | Clinical Decision Support</center>", unsafe_allow_html=True)
+    st.markdown("<center>LungVision AI | Clinical Decision Support System | Always verify with radiologist</center>", unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
