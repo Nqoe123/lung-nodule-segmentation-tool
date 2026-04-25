@@ -26,41 +26,39 @@ st.set_page_config(
     layout="wide"
 )
 
-# ========== CLEAN CSS ==========
+# ========== ALL TEXT WHITE ==========
 st.markdown("""
 <style>
+    /* Force ALL text to be white */
+    .stMarkdown, .stMarkdown p, .stMarkdown div, .stMarkdown span,
+    .stMetric label, .stMetric div, .stMetric span,
+    .stDataFrame, .stDataFrame div, .stDataFrame span,
+    .stSelectbox label, .stSelectbox div,
+    p, li, div, span, label, h1, h2, h3, h4, h5, h6,
+    .stAlert, .stAlert p, .stAlert div,
+    .stButton label,
+    .stTextInput label,
+    .stFileUploader label,
+    .stRadio label,
+    .stSuccess, .stInfo, .stWarning, .stError {
+        color: #FFFFFF !important;
+    }
+    
+    /* Header styling */
     .clinical-header {
         background: linear-gradient(135deg, #1e3a5f 0%, #2c5282 100%);
         padding: 1.8rem;
         border-radius: 12px;
         margin-bottom: 2rem;
         text-align: center;
-        color: white;
-    }
-    .clinical-header h1, .clinical-header p, .clinical-header small {
-        color: white !important;
     }
     
-    /* Make all regular text dark gray for readability */
-    p, li, span, div, label {
-        color: #2d3748 !important;
-    }
-    
-    /* Headers dark */
-    h1, h2, h3, h4, h5, h6 {
-        color: #1a202c !important;
-    }
-    
-    /* Metric cards - light background with dark text */
+    /* Metric cards with dark background */
     div[data-testid="stMetric"] {
-        background-color: #f7fafc;
+        background-color: #1a202c;
         padding: 15px;
         border-radius: 10px;
-        border: 1px solid #e2e8f0;
-    }
-    div[data-testid="stMetric"] label, 
-    div[data-testid="stMetric"] div {
-        color: #2d3748 !important;
+        border: 1px solid #4a5568;
     }
     
     /* Buttons */
@@ -68,14 +66,94 @@ st.markdown("""
         background-color: #2c5282;
         color: white !important;
         font-weight: 500;
+        border: 1px solid #4a5568;
+    }
+    .stButton > button:hover {
+        background-color: #1e3a5f;
+        color: white !important;
     }
     
-    /* Dataframe */
+    /* Dataframe - dark background */
     .stDataFrame {
-        background-color: white;
+        background-color: #1a202c;
+    }
+    .dataframe {
+        background-color: #1a202c !important;
+        color: white !important;
+    }
+    .dataframe th {
+        background-color: #2d3748 !important;
+        color: white !important;
+    }
+    .dataframe td {
+        background-color: #1a202c !important;
+        color: white !important;
     }
     
-    /* Success/Warning/Info boxes from Streamlit - text is automatically readable */
+    /* Alert boxes */
+    .stAlert {
+        background-color: #2d3748 !important;
+        border-left: 4px solid #4299e1 !important;
+    }
+    
+    /* Success boxes */
+    .stSuccess {
+        background-color: #22543d !important;
+    }
+    
+    /* Info boxes */
+    .stInfo {
+        background-color: #1a365d !important;
+    }
+    
+    /* Warning boxes */
+    .stWarning {
+        background-color: #744210 !important;
+    }
+    
+    /* Error boxes */
+    .stError {
+        background-color: #742a2a !important;
+    }
+    
+    /* File uploader */
+    .stFileUploader {
+        background-color: #1a202c;
+        padding: 10px;
+        border-radius: 8px;
+    }
+    
+    /* Selectbox */
+    .stSelectbox > div {
+        background-color: #1a202c;
+    }
+    
+    /* Radio buttons */
+    .stRadio > div {
+        background-color: #1a202c;
+        padding: 10px;
+        border-radius: 8px;
+    }
+    
+    /* Progress bar */
+    .stProgress > div {
+        background-color: #2d3748;
+    }
+    
+    /* Sidebar */
+    .css-1d391kg, .css-1633t36 {
+        background-color: #0f1419;
+    }
+    
+    /* Main background */
+    .main {
+        background-color: #0a0e12;
+    }
+    
+    /* Spinner text */
+    .stSpinner > div {
+        color: white !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -163,7 +241,7 @@ MODEL_FILENAME = "best_model.pth"
 def load_model():
     try:
         if not os.path.exists(MODEL_FILENAME):
-            with st.spinner("Downloading AI model..."):
+            with st.spinner("Loading AI model..."):
                 url = f"https://drive.google.com/uc?id={GOOGLE_DRIVE_FILE_ID}"
                 gdown.download(url, MODEL_FILENAME, quiet=True)
         
@@ -279,7 +357,7 @@ def main():
     if not st.session_state.authenticated:
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
-            st.subheader("🔐 Login")
+            st.markdown("### 🔐 Login")
             username = st.text_input("Radiologist ID")
             password = st.text_input("Password", type="password")
             if st.button("Login"):
@@ -291,25 +369,27 @@ def main():
         return
     
     with st.sidebar:
-        st.success("👤 Radiologist")
+        st.success("👤 Radiologist - Active")
         if st.button("Logout"):
             st.session_state.authenticated = False
             st.rerun()
         st.markdown("---")
-        st.markdown("**Model:** U-Net")
-        st.markdown("**Dice Score:** 0.74")
-        st.markdown("**Training:** LUNA16")
+        st.markdown("### Model Information")
+        st.markdown("- **Architecture:** U-Net")
+        st.markdown("- **Dice Score:** 0.74")
+        st.markdown("- **Training Data:** LUNA16")
+        st.markdown("- **Input Size:** 512×512")
     
     model = load_model()
     if model is None:
         st.stop()
     
-    st.markdown("### 📤 Upload & Detect")
+    st.markdown("### 📤 Upload Study")
     
     upload_type = st.radio("", ["Single CT Slice", "Full CT Volume"], horizontal=True)
     
     if upload_type == "Single CT Slice":
-        uploaded_file = st.file_uploader("Choose CT image", type=["png", "jpg", "jpeg"])
+        uploaded_file = st.file_uploader("Choose CT image (PNG/JPG)", type=["png", "jpg", "jpeg"])
         
         if uploaded_file:
             image = Image.open(uploaded_file).convert('L')
@@ -318,9 +398,10 @@ def main():
             col1, col2 = st.columns(2)
             
             with col1:
+                st.markdown("#### Original CT Slice")
                 fig, ax = plt.subplots(figsize=(5, 5))
                 ax.imshow(image_array, cmap='gray')
-                ax.set_title("Original CT Slice")
+                ax.set_title("CT Slice", color='white')
                 ax.axis('off')
                 st.pyplot(fig)
             
@@ -330,24 +411,25 @@ def main():
                 
                 if nodules:
                     with col2:
+                        st.markdown("#### Detection Results")
                         overlay = create_overlay(image_array, nodules)
                         fig2, ax2 = plt.subplots(figsize=(5, 5))
                         ax2.imshow(overlay)
-                        ax2.set_title(f"{len(nodules)} Nodule(s) Detected")
+                        ax2.set_title(f"{len(nodules)} Nodule(s) Detected", color='white')
                         ax2.axis('off')
                         st.pyplot(fig2)
                     
-                    st.markdown(f"### ✅ {len(nodules)} Nodule(s) Detected")
+                    st.markdown(f"## ✅ {len(nodules)} Nodule(s) Detected")
                     
                     for n in nodules:
                         with st.container():
-                            st.markdown(f"**Nodule {n['id']}**")
+                            st.markdown(f"### Nodule {n['id']}")
                             col_a, col_b = st.columns(2)
                             with col_a:
-                                st.write(f"📐 Area: {n['area_pixels']:.0f} pixels²")
-                                st.write(f"📏 Diameter: {n['diameter_pixels']:.1f} pixels")
+                                st.markdown(f"**Area:** {n['area_pixels']:.0f} pixels²")
+                                st.markdown(f"**Diameter:** {n['diameter_pixels']:.1f} pixels")
                             with col_b:
-                                st.write(f"📍 Location: ({n['centroid_x']:.0f}, {n['centroid_y']:.0f})")
+                                st.markdown(f"**Location (X,Y):** ({n['centroid_x']:.0f}, {n['centroid_y']:.0f})")
                             
                             if n['area_pixels'] < 100:
                                 st.info("📌 **Recommendation:** Routine follow-up in 12 months")
@@ -404,10 +486,10 @@ def main():
                     status_text.text("Analysis complete!")
                     
                     if all_nodules:
-                        st.markdown(f"### ✅ {len(all_nodules)} Nodule(s) Detected Across {len(slices_with_nodules)} Slices")
+                        st.markdown(f"## ✅ {len(all_nodules)} Nodule(s) Detected Across {len(slices_with_nodules)} Slices")
                         
                         # Summary Statistics
-                        st.markdown("#### 📊 Summary Statistics")
+                        st.markdown("### 📊 Summary Statistics")
                         col1, col2, col3 = st.columns(3)
                         col1.metric("Total Nodules", len(all_nodules))
                         col2.metric("Average Area", f"{np.mean([n['Area (px²)'] for n in all_nodules]):.0f} px²")
@@ -416,7 +498,7 @@ def main():
                         
                         # Visual Results
                         if slices_with_nodules:
-                            st.markdown("#### 🔍 Visual Results")
+                            st.markdown("### 🔍 Visual Results")
                             
                             slice_options = sorted(slices_with_nodules.keys())
                             selected_slice = st.selectbox(
@@ -430,7 +512,7 @@ def main():
                             
                             fig, ax = plt.subplots(figsize=(8, 8))
                             ax.imshow(overlay)
-                            ax.set_title(f"Slice {selected_slice} - {len(data['nodules'])} Nodule(s)")
+                            ax.set_title(f"Slice {selected_slice} - {len(data['nodules'])} Nodule(s)", color='white')
                             ax.axis('off')
                             st.pyplot(fig)
                             
@@ -440,17 +522,17 @@ def main():
                                 if spacing:
                                     diam = n['diameter_pixels'] * spacing[0]
                                     area = n['area_pixels'] * (spacing[0] ** 2)
-                                    st.write(f"• Nodule {n['id']}: {area:.1f} mm², {diam:.1f} mm at ({n['centroid_x']:.0f}, {n['centroid_y']:.0f})")
+                                    st.markdown(f"- **Nodule {n['id']}:** {area:.1f} mm², {diam:.1f} mm at ({n['centroid_x']:.0f}, {n['centroid_y']:.0f})")
                                 else:
-                                    st.write(f"• Nodule {n['id']}: {n['area_pixels']:.0f} px² at ({n['centroid_x']:.0f}, {n['centroid_y']:.0f})")
+                                    st.markdown(f"- **Nodule {n['id']}:** {n['area_pixels']:.0f} px² at ({n['centroid_x']:.0f}, {n['centroid_y']:.0f})")
                         
                         # Complete Results Table
-                        st.markdown("#### 📋 Complete Results")
+                        st.markdown("### 📋 Complete Results")
                         df = pd.DataFrame(all_nodules)
                         st.dataframe(df, use_container_width=True)
                         
                         # Clinical Recommendations
-                        st.markdown("#### 🩺 Clinical Recommendations")
+                        st.markdown("### 🩺 Clinical Recommendations")
                         
                         small = [n for n in all_nodules if n['Area (px²)'] < 100]
                         medium = [n for n in all_nodules if 100 <= n['Area (px²)'] < 300]
@@ -464,7 +546,7 @@ def main():
                             st.error(f"🚨 **Large Nodules ({len(large)} found)**\n\nSize > 300 pixels²\n\n**Recommendation:** Urgent consultation recommended")
                         
                         # Download Options
-                        st.markdown("#### 📥 Download Results")
+                        st.markdown("### 📥 Download Results")
                         csv = df.to_csv(index=False)
                         col1, col2 = st.columns(2)
                         with col1:
