@@ -2,24 +2,22 @@ import streamlit as st
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
 import numpy as np
-import cv2
-import os
-import glob
-from tqdm import tqdm
-import matplotlib.pyplot as plt
 import pandas as pd
-import SimpleITK as sitk
-import pydicom
-from scipy.ndimage import sobel, label
+from skimage.transform import resize
+from skimage.measure import label, regionprops
+from skimage.filters import sobel
 import tempfile
+import SimpleITK as sitk
 from collections import OrderedDict
 from PIL import Image
 import warnings
 from datetime import datetime
 import zipfile
+import os
 import gdown
+import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
 import shutil
 warnings.filterwarnings('ignore')
 
@@ -30,11 +28,11 @@ st.set_page_config(
     page_title="LungVision AI | Nodule Segmentation",
     page_icon="🫁",
     layout="wide",
-    initial_sidebar_state="expanded"
+   initial_sidebar_state="expanded"
 )
 
 # ============================================================
-# CT VALIDATION FUNCTIONS
+# CT VALIDATION FUNCTIONS (without OpenCV)
 # ============================================================
 def is_valid_lung_ct(image_array):
     """
@@ -44,7 +42,8 @@ def is_valid_lung_ct(image_array):
     # Convert to 2D if needed
     if len(image_array.shape) == 3:
         if image_array.shape[2] == 3:
-            image_array = cv2.cvtColor(image_array, cv2.COLOR_RGB2GRAY)
+            # Convert RGB to grayscale manually
+            image_array = 0.2989 * image_array[:, :, 0] + 0.5870 * image_array[:, :, 1] + 0.1140 * image_array[:, :, 2]
         else:
             image_array = image_array[:, :, 0]
     
@@ -52,7 +51,7 @@ def is_valid_lung_ct(image_array):
     
     # Check 1: Image dimensions (lung CT typically 512x512 or similar)
     if h < 200 or w < 200:
-        return False, "Image too small for CT scan"
+        return False, "Image too small for CT scan (minimum 200x200 pixels)"
     
     # Check 2: Intensity distribution - lung CT has characteristic range
     img_min, img_max = image_array.min(), image_array.max()
@@ -88,31 +87,35 @@ def is_valid_lung_ct(image_array):
         return False, "Image has sharp edges - appears to be a photograph, not a CT scan"
     
     # Check 5: Look for unnatural patterns (text, UI elements)
-    # Check for high-contrast small regions (text)
-    edges = cv2.Canny((image_array / image_array.max() * 255).astype(np.uint8), 50, 150)
+    # Using simple edge detection instead of Canny
+    edges = (grad_mag > 0.1).astype(np.uint8)
     edge_ratio = edges.sum() / (h * w)
     
-    if edge_ratio > 0.15:  # Too many edges
+    if edge_ratio > 0.2:  # Too many edges
         return False, "Too many high-contrast edges - may contain text or UI elements"
     
     # Check 6: Lung anatomy - should have bilateral dark regions
     # Split image into left and right halves (roughly)
     mid = w // 2
-    left_dark = dark_regions[:, :mid].sum() / (h * mid)
-    right_dark = dark_regions[:, mid:].sum() / (h * (w - mid))
+    left_dark = dark_regions[:, :mid].sum() / (h * mid) if mid > 0 else 0
+    right_dark = dark_regions[:, mid:].sum() / (h * (w - mid)) if (w - mid) > 0 else 0
     
     if left_dark < 0.03 or right_dark < 0.03:
         return False, "Missing expected dark regions (air-filled lung tissue)"
     
     return True, "Valid lung CT detected"
 
-def validate_zip_ct_volume(zip_path):
+def validate_zip_ct_volume(zip_file):
     """
     Validate that the ZIP contains a valid CT volume
     """
     tmp = tempfile.mkdtemp()
+    zpath = os.path.join(tmp, "upload.zip")
     try:
-        with zipfile.ZipFile(zip_path, 'r') as zf:
+        with open(zpath, "wb") as f:
+            f.write(zip_file.getbuffer())
+        
+        with zipfile.ZipFile(zpath, 'r') as zf:
             zf.extractall(tmp)
         
         # Find MHD file
@@ -126,6 +129,7 @@ def validate_zip_ct_volume(zip_path):
                 break
         
         if not mhd_file:
+            shutil.rmtree(tmp, ignore_errors=True)
             return False, "No .mhd file found in ZIP"
         
         # Try to read the volume
@@ -133,17 +137,22 @@ def validate_zip_ct_volume(zip_path):
         arr = sitk.GetArrayFromImage(img)
         
         if arr.ndim != 3:
+            shutil.rmtree(tmp, ignore_errors=True)
             return False, "Not a 3D volume"
         
         if arr.shape[1] < 200 or arr.shape[2] < 200:
+            shutil.rmtree(tmp, ignore_errors=True)
             return False, "Volume dimensions too small"
         
         # Check a few slices for CT characteristics
         sample_slices = [0, arr.shape[0]//2, arr.shape[0]-1]
         for z in sample_slices:
+            if z >= arr.shape[0]:
+                continue
             slice_img = arr[z]
             is_valid, reason = is_valid_lung_ct(slice_img)
             if not is_valid:
+                shutil.rmtree(tmp, ignore_errors=True)
                 return False, f"Invalid slice at position {z}: {reason}"
         
         shutil.rmtree(tmp, ignore_errors=True)
@@ -154,7 +163,7 @@ def validate_zip_ct_volume(zip_path):
         return False, f"Error reading volume: {str(e)}"
 
 # ============================================================
-# CLEAN CSS (Removed clutter, fixed centering)
+# CLEAN CSS
 # ============================================================
 st.markdown("""
 <style>
@@ -646,7 +655,7 @@ def draw_slice_view(ax, slice_img, labeled_2d, nodules_info, title=""):
 
 
 # ============================================================
-# LOGIN PAGE - FIXED CENTERING
+# LOGIN PAGE
 # ============================================================
 def show_login():
     st.markdown('<div class="login-wrapper">', unsafe_allow_html=True)
@@ -749,8 +758,7 @@ def show_app(model):
 
             with col2:
                 fig2, ax2 = plt.subplots(figsize=(5, 5))
-                from skimage.measure import label as sklabel
-                draw_slice_view(ax2, img_arr, sklabel(mask), nodules, title=f"{len(nodules)} Nodule(s)")
+                draw_slice_view(ax2, img_arr, label(mask), nodules, title=f"{len(nodules)} Nodule(s)")
                 st.pyplot(fig2)
                 plt.close(fig2)
 
