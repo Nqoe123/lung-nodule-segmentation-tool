@@ -6,7 +6,6 @@ import numpy as np
 import pandas as pd
 from skimage.transform import resize
 from skimage.measure import label, regionprops
-from skimage.filters import sobel
 import tempfile
 import SimpleITK as sitk
 from collections import OrderedDict
@@ -19,6 +18,7 @@ import gdown
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
 import shutil
+
 warnings.filterwarnings('ignore')
 
 # ============================================================
@@ -32,124 +32,7 @@ st.set_page_config(
 )
 
 # ============================================================
-# RELAXED CT VALIDATION FUNCTIONS
-# ============================================================
-def is_valid_lung_ct(image_array):
-    """
-    Validate that the uploaded image is a genuine lung CT scan.
-    Returns (is_valid, reason)
-    """
-    # Convert to 2D if needed
-    if len(image_array.shape) == 3:
-        if image_array.shape[2] == 3:
-            # Convert RGB to grayscale manually
-            image_array = 0.2989 * image_array[:, :, 0] + 0.5870 * image_array[:, :, 1] + 0.1140 * image_array[:, :, 2]
-        else:
-            image_array = image_array[:, :, 0]
-    
-    h, w = image_array.shape
-    
-    # Check 1: Image dimensions
-    if h < 100 or w < 100:
-        return False, "Image too small for CT scan"
-    
-    # Check 2: Intensity distribution - relaxed
-    img_min, img_max = image_array.min(), image_array.max()
-    img_range = img_max - img_min
-    
-    # If image has very low contrast (almost uniform), reject
-    if img_range < 10:
-        return False, "Image has very low contrast - not a valid CT scan"
-    
-    # Check 3: Lung tissue has dark and light regions (relaxed)
-    dark_threshold = np.percentile(image_array, 15)
-    dark_regions = (image_array < dark_threshold).astype(np.uint8)
-    dark_ratio = dark_regions.sum() / (h * w)
-    
-    # CT scans can have varying dark region ratios depending on slice position
-    # Only flag extreme cases
-    if dark_ratio < 0.01:
-        return False, "No dark regions detected - likely not a lung CT"
-    
-    # Check 4: Edge characteristics - only flag extreme cases
-    grad_x = sobel(image_array.astype(np.float32), axis=0)
-    grad_y = sobel(image_array.astype(np.float32), axis=1)
-    grad_mag = np.sqrt(grad_x**2 + grad_y**2)
-    grad_mean = grad_mag.mean()
-    
-    # Photos have very high edge gradients ( > 0.5), CT scans are lower
-    # This check is relaxed for CT scans (they can have sharper edges)
-    if grad_mean > 0.8:
-        return False, "Image has extremely sharp edges - appears to be a photograph"
-    
-    # Check 5: Edge density - only flag extreme cases
-    edges = (grad_mag > 0.15).astype(np.uint8)
-    edge_ratio = edges.sum() / (h * w)
-    
-    # Text/UI elements create many small edges, but lung CT can have some edges
-    if edge_ratio > 0.35:
-        return False, "Too many high-contrast edges - may contain text or UI elements"
-    
-    # All checks passed
-    return True, "Valid lung CT detected"
-
-def validate_zip_ct_volume(zip_file):
-    """
-    Validate that the ZIP contains a valid CT volume (relaxed)
-    """
-    tmp = tempfile.mkdtemp()
-    zpath = os.path.join(tmp, "upload.zip")
-    try:
-        with open(zpath, "wb") as f:
-            f.write(zip_file.getbuffer())
-        
-        with zipfile.ZipFile(zpath, 'r') as zf:
-            zf.extractall(tmp)
-        
-        # Find MHD file
-        mhd_file = None
-        for root, _, files in os.walk(tmp):
-            for fn in files:
-                if fn.lower().endswith('.mhd'):
-                    mhd_file = os.path.join(root, fn)
-                    break
-            if mhd_file:
-                break
-        
-        if not mhd_file:
-            shutil.rmtree(tmp, ignore_errors=True)
-            return False, "No .mhd file found in ZIP"
-        
-        # Try to read the volume
-        img = sitk.ReadImage(mhd_file)
-        arr = sitk.GetArrayFromImage(img)
-        
-        if arr.ndim != 3:
-            shutil.rmtree(tmp, ignore_errors=True)
-            return False, "Not a 3D volume"
-        
-        if arr.shape[1] < 100 or arr.shape[2] < 100:
-            shutil.rmtree(tmp, ignore_errors=True)
-            return False, "Volume dimensions too small"
-        
-        # Quick validation on middle slice only (faster)
-        mid_slice = arr.shape[0] // 2
-        slice_img = arr[mid_slice]
-        is_valid, reason = is_valid_lung_ct(slice_img)
-        
-        if not is_valid:
-            shutil.rmtree(tmp, ignore_errors=True)
-            return False, f"Volume validation failed: {reason}"
-        
-        shutil.rmtree(tmp, ignore_errors=True)
-        return True, "Valid CT volume"
-        
-    except Exception as e:
-        shutil.rmtree(tmp, ignore_errors=True)
-        return False, f"Error reading volume: {str(e)}"
-
-# ============================================================
-# CLEAN CSS - FIXED LOGIN CENTERING
+# CLEAN CSS (Removed clutter)
 # ============================================================
 st.markdown("""
 <style>
@@ -182,18 +65,12 @@ section[data-testid="stSidebar"] {
     border-right: 1px solid var(--border) !important;
 }
 
-/* Login wrapper - FIXED CENTERING */
+/* Login wrapper - centered */
 .login-wrapper {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
     display: flex;
     justify-content: center;
     align-items: center;
-    background: var(--bg-main);
-    z-index: 999;
+    min-height: 80vh;
 }
 
 .login-card {
@@ -204,7 +81,6 @@ section[data-testid="stSidebar"] {
     width: 100%;
     max-width: 380px;
     text-align: center;
-    box-shadow: 0 20px 40px rgba(0,0,0,0.3);
 }
 
 .login-icon {
@@ -216,7 +92,6 @@ section[data-testid="stSidebar"] {
     font-size: 1.5rem !important;
     font-weight: 700;
     margin-bottom: 0.25rem;
-    color: var(--text-1) !important;
 }
 
 .login-sub {
@@ -246,6 +121,7 @@ section[data-testid="stSidebar"] {
     margin-top: 0.2rem;
 }
 
+/* Section label */
 .section-label {
     font-size: 0.7rem;
     font-weight: 600;
@@ -255,6 +131,7 @@ section[data-testid="stSidebar"] {
     margin-bottom: 0.5rem;
 }
 
+/* Buttons */
 .stButton > button {
     background: linear-gradient(135deg, var(--primary), var(--primary-dark)) !important;
     color: white !important;
@@ -264,20 +141,33 @@ section[data-testid="stSidebar"] {
     padding: 0.5rem 1.2rem !important;
 }
 
+/* File uploader - fixed duplicate text */
+[data-testid="stFileUploader"] {
+    border: none !important;
+}
 [data-testid="stFileUploader"] > section > div {
     background: var(--bg-card) !important;
     border: 2px dashed var(--border) !important;
     border-radius: 14px !important;
     padding: 1.5rem !important;
 }
+[data-testid="stFileUploader"] label {
+    color: var(--text-2) !important;
+    font-size: 0.85rem !important;
+}
 
+/* Metric cards */
 div[data-testid="stMetric"] {
     background: var(--bg-card) !important;
     padding: 0.8rem 1rem !important;
     border-radius: 12px !important;
     border: 1px solid var(--border) !important;
 }
+div[data-testid="stMetricValue"] {
+    font-size: 1.3rem !important;
+}
 
+/* Radio group */
 .stRadio [data-baseweb="radio-group"] {
     background: var(--bg-card) !important;
     border: 1px solid var(--border) !important;
@@ -285,6 +175,7 @@ div[data-testid="stMetric"] {
     padding: 0.3rem !important;
 }
 
+/* Nodule result card */
 .nodule-result-card {
     background: var(--bg-card);
     border: 1px solid var(--border);
@@ -349,22 +240,6 @@ div[data-testid="stMetric"] {
     border-top: 1px solid var(--border);
 }
 
-.validation-error {
-    background: rgba(239,68,68,0.1);
-    border-left: 3px solid var(--red);
-    padding: 0.75rem 1rem;
-    border-radius: 8px;
-    margin: 1rem 0;
-}
-
-.validation-success {
-    background: rgba(16,185,129,0.1);
-    border-left: 3px solid var(--green);
-    padding: 0.75rem 1rem;
-    border-radius: 8px;
-    margin: 1rem 0;
-}
-
 #MainMenu, footer, header { visibility: hidden; }
 </style>
 """, unsafe_allow_html=True)
@@ -426,6 +301,7 @@ class MemoryEfficientUNet(nn.Module):
         self.n_channels = n_channels
         self.n_classes = n_classes
         self.bilinear = bilinear
+
         self.inc = DoubleConv(n_channels, 32)
         self.down1 = Down(32, 64)
         self.down2 = Down(64, 128)
@@ -437,6 +313,7 @@ class MemoryEfficientUNet(nn.Module):
         self.up3 = Up(128, 64 // factor, bilinear)
         self.up4 = Up(64, 32, bilinear)
         self.outc = OutConv(32, n_classes)
+
     def forward(self, x):
         x1 = self.inc(x)
         x2 = self.down1(x1)
@@ -461,7 +338,7 @@ MODEL_FN = "final_complete_model.pth"
 def load_model():
     try:
         if not os.path.exists(MODEL_FN):
-            with st.spinner("Downloading AI model..."):
+            with st.spinner("Downloading model..."):
                 url = f"https://drive.google.com/uc?id={GDRIVE_ID}"
                 gdown.download(url, MODEL_FN, quiet=False)
         
@@ -645,32 +522,30 @@ def draw_slice_view(ax, slice_img, labeled_2d, nodules_info, title=""):
 
 
 # ============================================================
-# LOGIN PAGE - FIXED (no scroll)
+# LOGIN PAGE
 # ============================================================
 def show_login():
+    st.markdown('<div class="login-wrapper">', unsafe_allow_html=True)
     st.markdown("""
-    <div class="login-wrapper">
-        <div class="login-card">
-            <div class="login-icon">🫁</div>
-            <h2>LungVision AI</h2>
-            <p class="login-sub">Clinical Nodule Segmentation</p>
-        </div>
+    <div class="login-card">
+        <div class="login-icon">🫁</div>
+        <h2>LungVision AI</h2>
+        <p class="login-sub">Clinical Nodule Segmentation</p>
     </div>
     """, unsafe_allow_html=True)
 
-    # Use columns to center the form within the fixed wrapper
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        with st.form("login_form", clear_on_submit=False):
-            user = st.text_input("Radiologist ID", placeholder="Enter your ID")
-            pwd = st.text_input("Password", type="password", placeholder="Enter password")
-            submitted = st.form_submit_button("Sign In", use_container_width=True)
-            if submitted:
-                if user == "radiologist" and pwd == "hit500":
-                    st.session_state.authenticated = True
-                    st.rerun()
-                else:
-                    st.error("Invalid credentials")
+    with st.form("login_form", clear_on_submit=False):
+        user = st.text_input("Radiologist ID", placeholder="Enter your ID")
+        pwd = st.text_input("Password", type="password", placeholder="Enter password")
+        submitted = st.form_submit_button("Sign In", use_container_width=True)
+        if submitted:
+            if user == "radiologist" and pwd == "hit500":
+                st.session_state.authenticated = True
+                st.rerun()
+            else:
+                st.error("Invalid credentials")
+
+    st.markdown('</div>', unsafe_allow_html=True)
 
 
 # ============================================================
@@ -693,13 +568,12 @@ def show_app(model):
             st.rerun()
         st.markdown("---")
         st.markdown("### ℹ️ Info")
-        st.caption("Upload a lung CT scan to detect and segment nodules.")
+        st.caption("Upload a CT scan to detect and segment lung nodules.")
         st.markdown("---")
         st.markdown("### 📋 Instructions")
         st.caption("1. Select scan type below")
         st.caption("2. Upload PNG or ZIP file")
-        st.caption("3. System validates it's a lung CT")
-        st.caption("4. View detected nodules")
+        st.caption("3. View detected nodules")
         st.markdown("---")
         st.markdown("### ⚠️ Disclaimer")
         st.caption("Clinical decision support only. Verify all findings.")
@@ -716,24 +590,6 @@ def show_app(model):
         if upfile is not None:
             img_pil = Image.open(upfile).convert('L')
             img_arr = np.array(img_pil, dtype=np.float32)
-            
-            # VALIDATE CT (relaxed)
-            is_valid, reason = is_valid_lung_ct(img_arr)
-            
-            if not is_valid:
-                st.markdown(f"""
-                <div class="validation-error">
-                    ⚠️ <strong>Invalid Input:</strong> {reason}<br>
-                    Please upload a genuine lung CT scan.
-                </div>
-                """, unsafe_allow_html=True)
-                return
-            
-            st.markdown("""
-            <div class="validation-success">
-                ✅ Valid lung CT detected. Processing...
-            </div>
-            """, unsafe_allow_html=True)
             
             with st.spinner("Analyzing..."):
                 mask = segment_slice(model, img_arr)
@@ -775,33 +631,11 @@ def show_app(model):
         upzip = st.file_uploader("Select ZIP with .mhd and .raw files", type=["zip"], label_visibility="collapsed")
 
         if upzip is not None:
-            # Validate ZIP (relaxed)
-            with st.spinner("Validating CT volume..."):
-                is_valid, reason = validate_zip_ct_volume(upzip)
-            
-            if not is_valid:
-                st.markdown(f"""
-                <div class="validation-error">
-                    ⚠️ <strong>Invalid CT Volume:</strong> {reason}<br>
-                    Please upload a valid lung CT volume in MHD/RAW format.
-                </div>
-                """, unsafe_allow_html=True)
-                return
-            
-            st.markdown("""
-            <div class="validation-success">
-                ✅ Valid lung CT volume detected. Processing...
-            </div>
-            """, unsafe_allow_html=True)
-            
-            # Reset file pointer
-            upzip.seek(0)
-            
             with st.spinner("Loading volume..."):
                 vol, sp_zyx, tmp = load_volume(upzip)
 
             if vol is None:
-                st.error("Could not read volume.")
+                st.error("Could not read volume. Ensure ZIP contains .mhd and .raw files.")
             else:
                 n_slices = vol.shape[0]
                 
@@ -848,11 +682,13 @@ def show_app(model):
                         </div>
                         """, unsafe_allow_html=True)
 
-                    # Slice viewer
+                    # Slice viewer - FIXED: use actual slice range
                     valid_slices = list(range(n_slices))
                     selected_slice = st.selectbox("View slice", valid_slices, format_func=lambda x: f"Slice {x}")
                     
+                    # Only process if slice is valid
                     if 0 <= selected_slice < n_slices:
+                        # Find nodules visible in this slice
                         visible_nodules = [n for n in nodules if n['slice_range'][0] <= selected_slice < n['slice_range'][1]]
                         
                         col1, col2 = st.columns(2)
