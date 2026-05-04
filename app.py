@@ -2,23 +2,25 @@ import streamlit as st
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
 import numpy as np
+import cv2
+import os
+import glob
+from tqdm import tqdm
+import matplotlib.pyplot as plt
 import pandas as pd
-from skimage.transform import resize
-from skimage.measure import label, regionprops
-import tempfile
 import SimpleITK as sitk
+import pydicom
+from scipy.ndimage import sobel, label
+import tempfile
 from collections import OrderedDict
 from PIL import Image
 import warnings
 from datetime import datetime
 import zipfile
-import os
 import gdown
-import matplotlib.pyplot as plt
-from matplotlib.patches import Circle
 import shutil
-
 warnings.filterwarnings('ignore')
 
 # ============================================================
@@ -32,7 +34,127 @@ st.set_page_config(
 )
 
 # ============================================================
-# CLEAN CSS (Removed clutter)
+# CT VALIDATION FUNCTIONS
+# ============================================================
+def is_valid_lung_ct(image_array):
+    """
+    Validate that the uploaded image is a genuine lung CT scan.
+    Returns (is_valid, reason)
+    """
+    # Convert to 2D if needed
+    if len(image_array.shape) == 3:
+        if image_array.shape[2] == 3:
+            image_array = cv2.cvtColor(image_array, cv2.COLOR_RGB2GRAY)
+        else:
+            image_array = image_array[:, :, 0]
+    
+    h, w = image_array.shape
+    
+    # Check 1: Image dimensions (lung CT typically 512x512 or similar)
+    if h < 200 or w < 200:
+        return False, "Image too small for CT scan"
+    
+    # Check 2: Intensity distribution - lung CT has characteristic range
+    img_min, img_max = image_array.min(), image_array.max()
+    img_mean = image_array.mean()
+    img_std = image_array.std()
+    
+    # Raw HU values (-1000 to 1000) or normalized (0-1)
+    if img_max > 1.0:  # Raw pixel values
+        if img_min < -800 or img_max > 500:
+            # Likely CT (has air and soft tissue)
+            pass
+        else:
+            return False, "Intensity range doesn't match lung CT characteristics"
+    
+    # Check 3: Lung tissue has dark (air) regions
+    # Lung window: air is dark, tissue is lighter
+    threshold = np.percentile(image_array, 20)  # Darkest 20%
+    dark_regions = (image_array < threshold).astype(np.uint8)
+    dark_ratio = dark_regions.sum() / (h * w)
+    
+    # Lung should have significant dark regions (air-filled)
+    if dark_ratio < 0.05 or dark_ratio > 0.5:
+        return False, f"Abnormal dark region ratio ({dark_ratio:.2f}) - not typical lung CT"
+    
+    # Check 4: Edge characteristics - medical CT has smoother gradients
+    grad_x = sobel(image_array.astype(np.float32), axis=0)
+    grad_y = sobel(image_array.astype(np.float32), axis=1)
+    grad_mag = np.sqrt(grad_x**2 + grad_y**2)
+    grad_mean = grad_mag.mean()
+    
+    # Photos have higher edge gradients
+    if grad_mean > 0.25:
+        return False, "Image has sharp edges - appears to be a photograph, not a CT scan"
+    
+    # Check 5: Look for unnatural patterns (text, UI elements)
+    # Check for high-contrast small regions (text)
+    edges = cv2.Canny((image_array / image_array.max() * 255).astype(np.uint8), 50, 150)
+    edge_ratio = edges.sum() / (h * w)
+    
+    if edge_ratio > 0.15:  # Too many edges
+        return False, "Too many high-contrast edges - may contain text or UI elements"
+    
+    # Check 6: Lung anatomy - should have bilateral dark regions
+    # Split image into left and right halves (roughly)
+    mid = w // 2
+    left_dark = dark_regions[:, :mid].sum() / (h * mid)
+    right_dark = dark_regions[:, mid:].sum() / (h * (w - mid))
+    
+    if left_dark < 0.03 or right_dark < 0.03:
+        return False, "Missing expected dark regions (air-filled lung tissue)"
+    
+    return True, "Valid lung CT detected"
+
+def validate_zip_ct_volume(zip_path):
+    """
+    Validate that the ZIP contains a valid CT volume
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            zf.extractall(tmp)
+        
+        # Find MHD file
+        mhd_file = None
+        for root, _, files in os.walk(tmp):
+            for fn in files:
+                if fn.lower().endswith('.mhd'):
+                    mhd_file = os.path.join(root, fn)
+                    break
+            if mhd_file:
+                break
+        
+        if not mhd_file:
+            return False, "No .mhd file found in ZIP"
+        
+        # Try to read the volume
+        img = sitk.ReadImage(mhd_file)
+        arr = sitk.GetArrayFromImage(img)
+        
+        if arr.ndim != 3:
+            return False, "Not a 3D volume"
+        
+        if arr.shape[1] < 200 or arr.shape[2] < 200:
+            return False, "Volume dimensions too small"
+        
+        # Check a few slices for CT characteristics
+        sample_slices = [0, arr.shape[0]//2, arr.shape[0]-1]
+        for z in sample_slices:
+            slice_img = arr[z]
+            is_valid, reason = is_valid_lung_ct(slice_img)
+            if not is_valid:
+                return False, f"Invalid slice at position {z}: {reason}"
+        
+        shutil.rmtree(tmp, ignore_errors=True)
+        return True, "Valid CT volume"
+        
+    except Exception as e:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return False, f"Error reading volume: {str(e)}"
+
+# ============================================================
+# CLEAN CSS (Removed clutter, fixed centering)
 # ============================================================
 st.markdown("""
 <style>
@@ -65,12 +187,14 @@ section[data-testid="stSidebar"] {
     border-right: 1px solid var(--border) !important;
 }
 
-/* Login wrapper - centered */
+/* Login wrapper - VERTICALLY CENTERED */
 .login-wrapper {
     display: flex;
     justify-content: center;
     align-items: center;
-    min-height: 80vh;
+    min-height: 100vh;
+    margin: 0;
+    padding: 0;
 }
 
 .login-card {
@@ -81,6 +205,7 @@ section[data-testid="stSidebar"] {
     width: 100%;
     max-width: 380px;
     text-align: center;
+    box-shadow: 0 20px 40px rgba(0,0,0,0.3);
 }
 
 .login-icon {
@@ -92,6 +217,7 @@ section[data-testid="stSidebar"] {
     font-size: 1.5rem !important;
     font-weight: 700;
     margin-bottom: 0.25rem;
+    color: var(--text-1) !important;
 }
 
 .login-sub {
@@ -121,7 +247,6 @@ section[data-testid="stSidebar"] {
     margin-top: 0.2rem;
 }
 
-/* Section label */
 .section-label {
     font-size: 0.7rem;
     font-weight: 600;
@@ -131,7 +256,6 @@ section[data-testid="stSidebar"] {
     margin-bottom: 0.5rem;
 }
 
-/* Buttons */
 .stButton > button {
     background: linear-gradient(135deg, var(--primary), var(--primary-dark)) !important;
     color: white !important;
@@ -141,33 +265,20 @@ section[data-testid="stSidebar"] {
     padding: 0.5rem 1.2rem !important;
 }
 
-/* File uploader - fixed duplicate text */
-[data-testid="stFileUploader"] {
-    border: none !important;
-}
 [data-testid="stFileUploader"] > section > div {
     background: var(--bg-card) !important;
     border: 2px dashed var(--border) !important;
     border-radius: 14px !important;
     padding: 1.5rem !important;
 }
-[data-testid="stFileUploader"] label {
-    color: var(--text-2) !important;
-    font-size: 0.85rem !important;
-}
 
-/* Metric cards */
 div[data-testid="stMetric"] {
     background: var(--bg-card) !important;
     padding: 0.8rem 1rem !important;
     border-radius: 12px !important;
     border: 1px solid var(--border) !important;
 }
-div[data-testid="stMetricValue"] {
-    font-size: 1.3rem !important;
-}
 
-/* Radio group */
 .stRadio [data-baseweb="radio-group"] {
     background: var(--bg-card) !important;
     border: 1px solid var(--border) !important;
@@ -175,7 +286,6 @@ div[data-testid="stMetricValue"] {
     padding: 0.3rem !important;
 }
 
-/* Nodule result card */
 .nodule-result-card {
     background: var(--bg-card);
     border: 1px solid var(--border);
@@ -240,6 +350,22 @@ div[data-testid="stMetricValue"] {
     border-top: 1px solid var(--border);
 }
 
+.validation-error {
+    background: rgba(239,68,68,0.1);
+    border-left: 3px solid var(--red);
+    padding: 0.75rem 1rem;
+    border-radius: 8px;
+    margin: 1rem 0;
+}
+
+.validation-success {
+    background: rgba(16,185,129,0.1);
+    border-left: 3px solid var(--green);
+    padding: 0.75rem 1rem;
+    border-radius: 8px;
+    margin: 1rem 0;
+}
+
 #MainMenu, footer, header { visibility: hidden; }
 </style>
 """, unsafe_allow_html=True)
@@ -301,7 +427,6 @@ class MemoryEfficientUNet(nn.Module):
         self.n_channels = n_channels
         self.n_classes = n_classes
         self.bilinear = bilinear
-
         self.inc = DoubleConv(n_channels, 32)
         self.down1 = Down(32, 64)
         self.down2 = Down(64, 128)
@@ -313,7 +438,6 @@ class MemoryEfficientUNet(nn.Module):
         self.up3 = Up(128, 64 // factor, bilinear)
         self.up4 = Up(64, 32, bilinear)
         self.outc = OutConv(32, n_classes)
-
     def forward(self, x):
         x1 = self.inc(x)
         x2 = self.down1(x1)
@@ -338,7 +462,7 @@ MODEL_FN = "final_complete_model.pth"
 def load_model():
     try:
         if not os.path.exists(MODEL_FN):
-            with st.spinner("Downloading model..."):
+            with st.spinner("Downloading AI model..."):
                 url = f"https://drive.google.com/uc?id={GDRIVE_ID}"
                 gdown.download(url, MODEL_FN, quiet=False)
         
@@ -522,7 +646,7 @@ def draw_slice_view(ax, slice_img, labeled_2d, nodules_info, title=""):
 
 
 # ============================================================
-# LOGIN PAGE
+# LOGIN PAGE - FIXED CENTERING
 # ============================================================
 def show_login():
     st.markdown('<div class="login-wrapper">', unsafe_allow_html=True)
@@ -568,12 +692,13 @@ def show_app(model):
             st.rerun()
         st.markdown("---")
         st.markdown("### ℹ️ Info")
-        st.caption("Upload a CT scan to detect and segment lung nodules.")
+        st.caption("Upload a lung CT scan to detect and segment nodules.")
         st.markdown("---")
         st.markdown("### 📋 Instructions")
         st.caption("1. Select scan type below")
         st.caption("2. Upload PNG or ZIP file")
-        st.caption("3. View detected nodules")
+        st.caption("3. System validates it's a lung CT")
+        st.caption("4. View detected nodules")
         st.markdown("---")
         st.markdown("### ⚠️ Disclaimer")
         st.caption("Clinical decision support only. Verify all findings.")
@@ -591,6 +716,24 @@ def show_app(model):
             img_pil = Image.open(upfile).convert('L')
             img_arr = np.array(img_pil, dtype=np.float32)
             
+            # VALIDATE CT
+            is_valid, reason = is_valid_lung_ct(img_arr)
+            
+            if not is_valid:
+                st.markdown(f"""
+                <div class="validation-error">
+                    ⚠️ <strong>Invalid Input:</strong> {reason}<br>
+                    Please upload a genuine lung CT scan.
+                </div>
+                """, unsafe_allow_html=True)
+                return
+            
+            st.markdown("""
+            <div class="validation-success">
+                ✅ Valid lung CT detected. Processing...
+            </div>
+            """, unsafe_allow_html=True)
+            
             with st.spinner("Analyzing..."):
                 mask = segment_slice(model, img_arr)
                 nodules = analyze_2d(mask, spacing_xy=None)
@@ -606,7 +749,8 @@ def show_app(model):
 
             with col2:
                 fig2, ax2 = plt.subplots(figsize=(5, 5))
-                draw_slice_view(ax2, img_arr, label(mask), nodules, title=f"{len(nodules)} Nodule(s)")
+                from skimage.measure import label as sklabel
+                draw_slice_view(ax2, img_arr, sklabel(mask), nodules, title=f"{len(nodules)} Nodule(s)")
                 st.pyplot(fig2)
                 plt.close(fig2)
 
@@ -631,11 +775,33 @@ def show_app(model):
         upzip = st.file_uploader("Select ZIP with .mhd and .raw files", type=["zip"], label_visibility="collapsed")
 
         if upzip is not None:
+            # Validate ZIP
+            with st.spinner("Validating CT volume..."):
+                is_valid, reason = validate_zip_ct_volume(upzip)
+            
+            if not is_valid:
+                st.markdown(f"""
+                <div class="validation-error">
+                    ⚠️ <strong>Invalid CT Volume:</strong> {reason}<br>
+                    Please upload a valid lung CT volume in MHD/RAW format.
+                </div>
+                """, unsafe_allow_html=True)
+                return
+            
+            st.markdown("""
+            <div class="validation-success">
+                ✅ Valid lung CT volume detected. Processing...
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Reset file pointer
+            upzip.seek(0)
+            
             with st.spinner("Loading volume..."):
                 vol, sp_zyx, tmp = load_volume(upzip)
 
             if vol is None:
-                st.error("Could not read volume. Ensure ZIP contains .mhd and .raw files.")
+                st.error("Could not read volume.")
             else:
                 n_slices = vol.shape[0]
                 
@@ -682,13 +848,11 @@ def show_app(model):
                         </div>
                         """, unsafe_allow_html=True)
 
-                    # Slice viewer - FIXED: use actual slice range
+                    # Slice viewer
                     valid_slices = list(range(n_slices))
                     selected_slice = st.selectbox("View slice", valid_slices, format_func=lambda x: f"Slice {x}")
                     
-                    # Only process if slice is valid
                     if 0 <= selected_slice < n_slices:
-                        # Find nodules visible in this slice
                         visible_nodules = [n for n in nodules if n['slice_range'][0] <= selected_slice < n['slice_range'][1]]
                         
                         col1, col2 = st.columns(2)
