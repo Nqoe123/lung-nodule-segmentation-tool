@@ -7,3 +7,5 @@ matplotlib
 scikit-image
 gdown
 SimpleITK
+pandas
+pydicom
