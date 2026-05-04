@@ -28,11 +28,11 @@ st.set_page_config(
     page_title="LungVision AI | Nodule Segmentation",
     page_icon="🫁",
     layout="wide",
-   initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded"
 )
 
 # ============================================================
-# CT VALIDATION FUNCTIONS (without OpenCV)
+# RELAXED CT VALIDATION FUNCTIONS
 # ============================================================
 def is_valid_lung_ct(image_array):
     """
@@ -49,65 +49,53 @@ def is_valid_lung_ct(image_array):
     
     h, w = image_array.shape
     
-    # Check 1: Image dimensions (lung CT typically 512x512 or similar)
-    if h < 200 or w < 200:
-        return False, "Image too small for CT scan (minimum 200x200 pixels)"
+    # Check 1: Image dimensions
+    if h < 100 or w < 100:
+        return False, "Image too small for CT scan"
     
-    # Check 2: Intensity distribution - lung CT has characteristic range
+    # Check 2: Intensity distribution - relaxed
     img_min, img_max = image_array.min(), image_array.max()
-    img_mean = image_array.mean()
-    img_std = image_array.std()
+    img_range = img_max - img_min
     
-    # Raw HU values (-1000 to 1000) or normalized (0-1)
-    if img_max > 1.0:  # Raw pixel values
-        if img_min < -800 or img_max > 500:
-            # Likely CT (has air and soft tissue)
-            pass
-        else:
-            return False, "Intensity range doesn't match lung CT characteristics"
+    # If image has very low contrast (almost uniform), reject
+    if img_range < 10:
+        return False, "Image has very low contrast - not a valid CT scan"
     
-    # Check 3: Lung tissue has dark (air) regions
-    # Lung window: air is dark, tissue is lighter
-    threshold = np.percentile(image_array, 20)  # Darkest 20%
-    dark_regions = (image_array < threshold).astype(np.uint8)
+    # Check 3: Lung tissue has dark and light regions (relaxed)
+    dark_threshold = np.percentile(image_array, 15)
+    dark_regions = (image_array < dark_threshold).astype(np.uint8)
     dark_ratio = dark_regions.sum() / (h * w)
     
-    # Lung should have significant dark regions (air-filled)
-    if dark_ratio < 0.05 or dark_ratio > 0.5:
-        return False, f"Abnormal dark region ratio ({dark_ratio:.2f}) - not typical lung CT"
+    # CT scans can have varying dark region ratios depending on slice position
+    # Only flag extreme cases
+    if dark_ratio < 0.01:
+        return False, "No dark regions detected - likely not a lung CT"
     
-    # Check 4: Edge characteristics - medical CT has smoother gradients
+    # Check 4: Edge characteristics - only flag extreme cases
     grad_x = sobel(image_array.astype(np.float32), axis=0)
     grad_y = sobel(image_array.astype(np.float32), axis=1)
     grad_mag = np.sqrt(grad_x**2 + grad_y**2)
     grad_mean = grad_mag.mean()
     
-    # Photos have higher edge gradients
-    if grad_mean > 0.25:
-        return False, "Image has sharp edges - appears to be a photograph, not a CT scan"
+    # Photos have very high edge gradients ( > 0.5), CT scans are lower
+    # This check is relaxed for CT scans (they can have sharper edges)
+    if grad_mean > 0.8:
+        return False, "Image has extremely sharp edges - appears to be a photograph"
     
-    # Check 5: Look for unnatural patterns (text, UI elements)
-    # Using simple edge detection instead of Canny
-    edges = (grad_mag > 0.1).astype(np.uint8)
+    # Check 5: Edge density - only flag extreme cases
+    edges = (grad_mag > 0.15).astype(np.uint8)
     edge_ratio = edges.sum() / (h * w)
     
-    if edge_ratio > 0.2:  # Too many edges
+    # Text/UI elements create many small edges, but lung CT can have some edges
+    if edge_ratio > 0.35:
         return False, "Too many high-contrast edges - may contain text or UI elements"
     
-    # Check 6: Lung anatomy - should have bilateral dark regions
-    # Split image into left and right halves (roughly)
-    mid = w // 2
-    left_dark = dark_regions[:, :mid].sum() / (h * mid) if mid > 0 else 0
-    right_dark = dark_regions[:, mid:].sum() / (h * (w - mid)) if (w - mid) > 0 else 0
-    
-    if left_dark < 0.03 or right_dark < 0.03:
-        return False, "Missing expected dark regions (air-filled lung tissue)"
-    
+    # All checks passed
     return True, "Valid lung CT detected"
 
 def validate_zip_ct_volume(zip_file):
     """
-    Validate that the ZIP contains a valid CT volume
+    Validate that the ZIP contains a valid CT volume (relaxed)
     """
     tmp = tempfile.mkdtemp()
     zpath = os.path.join(tmp, "upload.zip")
@@ -140,20 +128,18 @@ def validate_zip_ct_volume(zip_file):
             shutil.rmtree(tmp, ignore_errors=True)
             return False, "Not a 3D volume"
         
-        if arr.shape[1] < 200 or arr.shape[2] < 200:
+        if arr.shape[1] < 100 or arr.shape[2] < 100:
             shutil.rmtree(tmp, ignore_errors=True)
             return False, "Volume dimensions too small"
         
-        # Check a few slices for CT characteristics
-        sample_slices = [0, arr.shape[0]//2, arr.shape[0]-1]
-        for z in sample_slices:
-            if z >= arr.shape[0]:
-                continue
-            slice_img = arr[z]
-            is_valid, reason = is_valid_lung_ct(slice_img)
-            if not is_valid:
-                shutil.rmtree(tmp, ignore_errors=True)
-                return False, f"Invalid slice at position {z}: {reason}"
+        # Quick validation on middle slice only (faster)
+        mid_slice = arr.shape[0] // 2
+        slice_img = arr[mid_slice]
+        is_valid, reason = is_valid_lung_ct(slice_img)
+        
+        if not is_valid:
+            shutil.rmtree(tmp, ignore_errors=True)
+            return False, f"Volume validation failed: {reason}"
         
         shutil.rmtree(tmp, ignore_errors=True)
         return True, "Valid CT volume"
@@ -163,7 +149,7 @@ def validate_zip_ct_volume(zip_file):
         return False, f"Error reading volume: {str(e)}"
 
 # ============================================================
-# CLEAN CSS
+# CLEAN CSS - FIXED LOGIN CENTERING
 # ============================================================
 st.markdown("""
 <style>
@@ -196,14 +182,18 @@ section[data-testid="stSidebar"] {
     border-right: 1px solid var(--border) !important;
 }
 
-/* Login wrapper - VERTICALLY CENTERED */
+/* Login wrapper - FIXED CENTERING */
 .login-wrapper {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
     display: flex;
     justify-content: center;
     align-items: center;
-    min-height: 100vh;
-    margin: 0;
-    padding: 0;
+    background: var(--bg-main);
+    z-index: 999;
 }
 
 .login-card {
@@ -655,30 +645,32 @@ def draw_slice_view(ax, slice_img, labeled_2d, nodules_info, title=""):
 
 
 # ============================================================
-# LOGIN PAGE
+# LOGIN PAGE - FIXED (no scroll)
 # ============================================================
 def show_login():
-    st.markdown('<div class="login-wrapper">', unsafe_allow_html=True)
     st.markdown("""
-    <div class="login-card">
-        <div class="login-icon">🫁</div>
-        <h2>LungVision AI</h2>
-        <p class="login-sub">Clinical Nodule Segmentation</p>
+    <div class="login-wrapper">
+        <div class="login-card">
+            <div class="login-icon">🫁</div>
+            <h2>LungVision AI</h2>
+            <p class="login-sub">Clinical Nodule Segmentation</p>
+        </div>
     </div>
     """, unsafe_allow_html=True)
 
-    with st.form("login_form", clear_on_submit=False):
-        user = st.text_input("Radiologist ID", placeholder="Enter your ID")
-        pwd = st.text_input("Password", type="password", placeholder="Enter password")
-        submitted = st.form_submit_button("Sign In", use_container_width=True)
-        if submitted:
-            if user == "radiologist" and pwd == "hit500":
-                st.session_state.authenticated = True
-                st.rerun()
-            else:
-                st.error("Invalid credentials")
-
-    st.markdown('</div>', unsafe_allow_html=True)
+    # Use columns to center the form within the fixed wrapper
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        with st.form("login_form", clear_on_submit=False):
+            user = st.text_input("Radiologist ID", placeholder="Enter your ID")
+            pwd = st.text_input("Password", type="password", placeholder="Enter password")
+            submitted = st.form_submit_button("Sign In", use_container_width=True)
+            if submitted:
+                if user == "radiologist" and pwd == "hit500":
+                    st.session_state.authenticated = True
+                    st.rerun()
+                else:
+                    st.error("Invalid credentials")
 
 
 # ============================================================
@@ -725,7 +717,7 @@ def show_app(model):
             img_pil = Image.open(upfile).convert('L')
             img_arr = np.array(img_pil, dtype=np.float32)
             
-            # VALIDATE CT
+            # VALIDATE CT (relaxed)
             is_valid, reason = is_valid_lung_ct(img_arr)
             
             if not is_valid:
@@ -783,7 +775,7 @@ def show_app(model):
         upzip = st.file_uploader("Select ZIP with .mhd and .raw files", type=["zip"], label_visibility="collapsed")
 
         if upzip is not None:
-            # Validate ZIP
+            # Validate ZIP (relaxed)
             with st.spinner("Validating CT volume..."):
                 is_valid, reason = validate_zip_ct_volume(upzip)
             
