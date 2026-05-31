@@ -10,12 +10,14 @@ from scipy.ndimage import binary_closing
 import tempfile
 import SimpleITK as sitk
 from collections import OrderedDict
-from PIL import Image, ImageDraw
+from PIL import Image
 import warnings
 from datetime import datetime
 import zipfile
 import os
-import requests
+import gdown
+import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
 import shutil
 
 warnings.filterwarnings('ignore')
@@ -117,6 +119,15 @@ st.markdown("""
     }
     .login-mode [data-testid="stSidebar"] { display: none; }
     .login-mode header { display: none; }
+    .spacing-info {
+        font-family: monospace;
+        font-size: 0.7rem;
+        color: #38bdf8;
+        background: rgba(0,0,0,0.3);
+        padding: 0.2rem 0.5rem;
+        border-radius: 4px;
+        display: inline-block;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -185,55 +196,40 @@ class MemoryEfficientUNet(nn.Module):
 
 
 # ============================================================
-# MODEL LOADING - DIRECT DOWNLOAD FROM RAW URL
+# MODEL LOADING
 # ============================================================
-# IMPORTANT: You need to upload best_model.pth to GitHub or use a direct download link
-# For now, we'll use a placeholder. You need to replace this URL with your actual model file URL
-
-MODEL_URL = "https://github.com/YOUR_USERNAME/YOUR_REPO/raw/main/best_model.pth"
+GDRIVE_ID = "1ZMXIzhxrvtEwXmbs1G2HrVRMl8-RkKc8"
 MODEL_FN = "best_model.pth"
 
 @st.cache_resource
 def load_model():
     try:
-        model_path = MODEL_FN
+        if not os.path.exists(MODEL_FN):
+            with st.spinner("Initializing AI Core..."):
+                url = f"https://drive.google.com/uc?id={GDRIVE_ID}"
+                gdown.download(url, MODEL_FN, quiet=False)
         
-        # Check if model file exists
-        if not os.path.exists(model_path):
-            st.warning("Model file not found. Using fallback mode.")
-            st.info("For full functionality, upload the best_model.pth file or provide a valid download URL.")
-            return None
-        
-        # Create model instance
         model = MemoryEfficientUNet(n_channels=1, n_classes=1)
+        state_dict = torch.load(MODEL_FN, map_location='cpu')
         
-        # Load state dict
-        state_dict = torch.load(model_path, map_location='cpu')
-        
-        # Handle different state dict formats
         if isinstance(state_dict, dict):
             if 'model_state_dict' in state_dict:
                 state_dict = state_dict['model_state_dict']
             elif 'state_dict' in state_dict:
                 state_dict = state_dict['state_dict']
         
-        # Remove 'module.' prefix if present
-        if state_dict and len(state_dict) > 0 and 'module.' in list(state_dict.keys())[0]:
+        if state_dict and 'module.' in list(state_dict.keys())[0]:
             new_state_dict = OrderedDict()
             for k, v in state_dict.items():
                 name = k[7:]
                 new_state_dict[name] = v
             state_dict = new_state_dict
         
-        # Load weights
         model.load_state_dict(state_dict)
         model.eval()
-        
-        st.success("Model loaded successfully!")
         return model
-        
     except Exception as e:
-        st.error(f"Model loading failed: {str(e)}")
+        st.error(f"System Alert: {str(e)}")
         return None
 
 
@@ -315,7 +311,6 @@ def load_volume(zip_file):
             break
     
     if not mhd:
-        shutil.rmtree(tmp, ignore_errors=True)
         return None, None, None
     
     img = sitk.ReadImage(mhd)
@@ -325,12 +320,11 @@ def load_volume(zip_file):
     
     return volume, spacing_zyx, tmp
 
-def create_overlay_image_pil(slice_img, nodules_in_slice):
-    img_norm = (slice_img - slice_img.min()) / (slice_img.max() - slice_img.min() + 1e-9)
-    img_uint8 = (img_norm * 255).astype(np.uint8)
+def draw_with_matplotlib(img, mask, nodules_in_slice, title):
+    fig, ax = plt.subplots(figsize=(6, 6), facecolor='#0b1120')
     
-    img_pil = Image.fromarray(img_uint8).convert('RGB')
-    draw = ImageDraw.Draw(img_pil)
+    img_display = apply_lung_window(img)
+    ax.imshow(img_display, cmap='gray')
     
     for nodule in nodules_in_slice:
         if 'mask_in_slice' not in nodule:
@@ -341,15 +335,24 @@ def create_overlay_image_pil(slice_img, nodules_in_slice):
         if len(xs) == 0:
             continue
         
-        cx = int(np.mean(xs))
-        cy = int(np.mean(ys))
-        radius = int(max((np.max(xs) - np.min(xs)) / 2, (np.max(ys) - np.min(ys)) / 2)) + 8
+        cx = np.mean(xs)
+        cy = np.mean(ys)
+        radius = max((np.max(xs) - np.min(xs)) / 2, (np.max(ys) - np.min(ys)) / 2) + 8
         
-        draw.ellipse([cx - radius, cy - radius, cx + radius, cy + radius], outline=(6, 182, 212), width=2)
+        circle = Circle((cx, cy), radius, fill=False, edgecolor='#06b6d4', linewidth=2.5)
+        ax.add_patch(circle)
+        
         label_text = f"N{nodule['id']}\n{nodule['diameter_mm']:.1f}mm"
-        draw.text((cx + radius + 5, cy - radius), label_text, fill=(241, 245, 249))
+        ax.annotate(
+            label_text,
+            xy=(cx, cy), xytext=(cx + radius + 8, cy - radius),
+            fontsize=9, fontweight='600', color='#f1f5f9',
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='#0f172a', edgecolor='#06b6d4', alpha=0.9),
+        )
     
-    return img_pil
+    ax.set_title(title, color='#f1f5f9', fontsize=12)
+    ax.axis('off')
+    return fig
 
 
 # ============================================================
@@ -358,9 +361,7 @@ def create_overlay_image_pil(slice_img, nodules_in_slice):
 def show_login():
     st.markdown('<div class="login-mode">', unsafe_allow_html=True)
     
-    st.markdown('<div style="height: 15vh;"></div>', unsafe_allow_html=True)
-    
-    col1, col2, col3 = st.columns([1, 2, 1])
+    col1, col2, col3 = st.columns([1, 2, 1], vertical_alignment="center")
     
     with col2:
         st.markdown("""
@@ -383,6 +384,8 @@ def show_login():
                     st.rerun()
                 else:
                     st.error("Access Denied: Invalid Credentials")
+
+        st.markdown("</div>", unsafe_allow_html=True)
     
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -395,7 +398,7 @@ def show_app(model):
     <div class="glass-panel" style="margin-bottom: 1.5rem; display: flex; justify-content: space-between; align-items: center;">
         <div>
             <h1 style="margin:0; font-size: 1.5rem;">LungVision <span style="color:#38bdf8">AI</span></h1>
-            <div style="color:#94a3b8; font-size: 0.85rem;">User: {st.session_state.get('username', 'Guest')}</div>
+            <div style="color:#94a3b8; font-size: 0.85rem;">User: {st.session_state.get('username', 'Guest')} | System Online</div>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -407,34 +410,33 @@ def show_app(model):
             st.rerun()
         st.markdown("---")
         st.info("Upload CT volume (MHD + RAW as ZIP) for automated nodule detection.")
+        st.markdown("---")
+        st.caption("Clinical measurements in mm and mm³ using DICOM metadata.")
 
     st.markdown('<div class="section-label">Clinical CT Upload</div>', unsafe_allow_html=True)
     
     upzip = st.file_uploader(
         "Upload CT Volume (ZIP with .mhd and .raw files)", 
         type=["zip"], 
-        label_visibility="collapsed"
+        label_visibility="collapsed",
+        help="From DICOM series converted to MHD/RAW format"
     )
 
     if upzip:
-        with st.spinner("Loading CT volume..."):
+        with st.spinner("Loading CT volume from DICOM..."):
             volume, spacing_zyx, temp_dir = load_volume(upzip)
         
         if volume is None:
-            st.error("Invalid CT volume. Ensure ZIP contains .mhd and .raw files.")
+            st.error("Invalid CT volume. Ensure ZIP contains .mhd and .raw files from a DICOM series.")
         else:
             num_slices = volume.shape[0]
             st.success(f"CT Loaded: {num_slices} slices")
             
-            with st.expander("Scan Parameters", expanded=True):
+            with st.expander("Scan Parameters (from DICOM metadata)", expanded=True):
                 col1, col2, col3 = st.columns(3)
                 col1.metric("Pixel Spacing (X)", f"{spacing_zyx[2]:.3f} mm")
                 col2.metric("Pixel Spacing (Y)", f"{spacing_zyx[1]:.3f} mm")
                 col3.metric("Slice Thickness (Z)", f"{spacing_zyx[0]:.3f} mm")
-            
-            if model is None:
-                st.warning("AI model not loaded. Segmentation will use fallback mode.")
-                st.stop()
             
             prog = st.progress(0)
             status = st.empty()
@@ -487,7 +489,7 @@ def show_app(model):
                         </div>
                         <div class="metric-box">
                             <div class="metric-val">{n['volume_mm3']:.0f}</div>
-                            <div class="metric-lbl">Volume</div>
+                            <div class="metric-lbl">Volume (mm³)</div>
                         </div>
                         <div class="metric-box">
                             <div class="metric-val">Slices {n['slice_start']}-{n['slice_end']}</div>
@@ -496,7 +498,7 @@ def show_app(model):
                         <span class="badge {badge_class}">{risk_label}</span>
                     </div>
                     <div style="margin-left: 60px; margin-bottom: 10px; font-size: 0.7rem; color: #94a3b8;">
-                        Recommendation: {rec}
+                        Clinical recommendation: {rec}
                     </div>
                     """, unsafe_allow_html=True)
                 st.markdown('</div>', unsafe_allow_html=True)
@@ -520,16 +522,44 @@ def show_app(model):
                 col1, col2 = st.columns(2)
                 
                 with col1:
+                    fig, ax = plt.subplots(figsize=(6, 6), facecolor='#0b1120')
                     img_display = apply_lung_window(volume[slice_idx])
-                    st.image(img_display, caption=f"Slice {slice_idx} - Original", use_container_width=True, clamp=True)
+                    ax.imshow(img_display, cmap='gray')
+                    ax.set_title(f"Slice {slice_idx} - Original", color='#f1f5f9', fontsize=12)
+                    ax.axis('off')
+                    st.pyplot(fig)
+                    plt.close(fig)
 
                 with col2:
-                    if nodules_in_slice:
-                        overlay_img = create_overlay_image_pil(volume[slice_idx], nodules_in_slice)
-                        st.image(overlay_img, caption=f"Slice {slice_idx} - {len(nodules_in_slice)} Nodule(s)", use_container_width=True)
-                    else:
-                        st.image(img_display, caption=f"Slice {slice_idx} - No nodules", use_container_width=True, clamp=True)
+                    fig2, ax2 = plt.subplots(figsize=(6, 6), facecolor='#0b1120')
+                    img_display = apply_lung_window(volume[slice_idx])
+                    ax2.imshow(img_display, cmap='gray')
+                    
+                    for n in nodules_in_slice:
+                        nodule_mask = n['mask_in_slice']
+                        ys, xs = np.where(nodule_mask)
+                        if len(xs) > 0:
+                            cx = np.mean(xs)
+                            cy = np.mean(ys)
+                            radius = max((np.max(xs) - np.min(xs)) / 2, (np.max(ys) - np.min(ys)) / 2) + 8
+                            
+                            circle = Circle((cx, cy), radius, fill=False, edgecolor='#06b6d4', linewidth=2.5)
+                            ax2.add_patch(circle)
+                            
+                            label_text = f"N{n['id']}\n{n['diameter_mm']:.1f}mm"
+                            ax2.annotate(
+                                label_text,
+                                xy=(cx, cy), xytext=(cx + radius + 8, cy - radius),
+                                fontsize=9, fontweight='600', color='#f1f5f9',
+                                bbox=dict(boxstyle='round,pad=0.3', facecolor='#0f172a', edgecolor='#06b6d4', alpha=0.9),
+                            )
+                    
+                    ax2.set_title(f"Slice {slice_idx} - {len(nodules_in_slice)} Nodule(s) Detected", color='#f1f5f9', fontsize=12)
+                    ax2.axis('off')
+                    st.pyplot(fig2)
+                    plt.close(fig2)
                 
+                # Export clinical report
                 df = pd.DataFrame([{
                     "Nodule ID": n['id'],
                     "Diameter (mm)": round(n['diameter_mm'], 2),
@@ -562,7 +592,10 @@ def main():
         show_login()
     else:
         model = load_model()
-        show_app(model)
+        if model:
+            show_app(model)
+        else:
+            st.stop()
 
 if __name__ == "__main__":
     main()
