@@ -18,6 +18,7 @@ import gdown
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
 import shutil
+import base64
 
 warnings.filterwarnings('ignore')
 
@@ -32,7 +33,7 @@ st.set_page_config(
 )
 
 # ============================================================
-# CLEAN CSS
+# CUSTOM CSS - FIXED LOGIN PAGE
 # ============================================================
 st.markdown("""
 <style>
@@ -44,7 +45,8 @@ st.markdown("""
     box-sizing: border-box;
 }
 
-html, body, .main, .main .block-container {
+html, body {
+    height: 100%;
     margin: 0;
     padding: 0;
 }
@@ -52,8 +54,100 @@ html, body, .main, .main .block-container {
 .main .block-container {
     background: #0b1120;
     max-width: 1400px;
-    padding: 0rem 1rem 2rem 1rem !important;
-    margin-top: 0 !important;
+    padding: 1rem 1rem 2rem 1rem !important;
+}
+
+/* Full screen login container */
+.login-fullscreen {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: linear-gradient(135deg, #0b1120 0%, #060b14 100%);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 9999;
+}
+
+.login-container {
+    background: linear-gradient(160deg, #111d32 0%, #0b1221 100%);
+    border: 1px solid #1e2d4a;
+    border-radius: 28px;
+    padding: 3rem 2.5rem;
+    width: 100%;
+    max-width: 420px;
+    text-align: center;
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+}
+
+.login-icon {
+    font-size: 4rem;
+    margin-bottom: 1rem;
+}
+
+.login-container h2 {
+    font-size: 1.8rem !important;
+    font-weight: 700;
+    margin-bottom: 0.5rem;
+    color: #f1f5f9;
+}
+
+.login-sub {
+    color: #64748b !important;
+    font-size: 0.85rem;
+    margin-bottom: 2rem;
+}
+
+.login-input {
+    margin-bottom: 1rem;
+}
+
+.login-input label {
+    display: block;
+    text-align: left;
+    color: #94a3b8;
+    font-size: 0.8rem;
+    margin-bottom: 0.3rem;
+}
+
+.login-input input {
+    width: 100%;
+    padding: 0.75rem 1rem;
+    background: #0f172a;
+    border: 1px solid #1e2d4a;
+    border-radius: 10px;
+    color: #f1f5f9;
+    font-size: 0.9rem;
+}
+
+.login-input input:focus {
+    outline: none;
+    border-color: #0ea5e9;
+}
+
+.login-button {
+    width: 100%;
+    padding: 0.75rem;
+    background: linear-gradient(135deg, #0ea5e9, #0369a1);
+    color: white;
+    border: none;
+    border-radius: 10px;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    margin-top: 0.5rem;
+}
+
+.login-button:hover {
+    background: linear-gradient(135deg, #0284c7, #075985);
+}
+
+.login-footer {
+    margin-top: 1.5rem;
+    color: #475569;
+    font-size: 0.7rem;
 }
 
 section[data-testid="stSidebar"] {
@@ -61,53 +155,12 @@ section[data-testid="stSidebar"] {
     border-right: 1px solid #1e2d4a !important;
 }
 
-/* Login wrapper - centered with no top space */
-.login-wrapper {
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    min-height: 100vh;
-    margin: 0;
-    padding: 0;
-    background: #0b1120;
-}
-
-.login-card {
-    background: linear-gradient(160deg, #111d32 0%, #0b1221 100%);
-    border: 1px solid #1e2d4a;
-    border-radius: 24px;
-    padding: 2.5rem 2rem;
-    width: 100%;
-    max-width: 380px;
-    text-align: center;
-}
-
-.login-icon {
-    font-size: 3rem;
-    margin-bottom: 0.5rem;
-}
-
-.login-card h2 {
-    font-size: 1.5rem !important;
-    font-weight: 700;
-    margin-bottom: 0.25rem;
-    color: #f1f5f9;
-}
-
-.login-sub {
-    color: #64748b !important;
-    font-size: 0.8rem;
-    margin-bottom: 1.5rem;
-}
-
-/* Header */
 .header-card {
     background: linear-gradient(135deg, #0c2340 0%, #132e52 100%);
     border: 1px solid #1e2d4a;
     border-radius: 16px;
     padding: 1.25rem 2rem;
     margin-bottom: 1.5rem;
-    margin-top: 0.5rem;
 }
 
 .header-card h1 {
@@ -123,7 +176,6 @@ section[data-testid="stSidebar"] {
     margin-top: 0.2rem;
 }
 
-/* Section label */
 .section-label {
     font-size: 0.7rem;
     font-weight: 600;
@@ -133,7 +185,6 @@ section[data-testid="stSidebar"] {
     margin-bottom: 0.5rem;
 }
 
-/* Buttons */
 .stButton > button {
     background: linear-gradient(135deg, #0ea5e9, #0369a1) !important;
     color: white !important;
@@ -143,42 +194,25 @@ section[data-testid="stSidebar"] {
     padding: 0.5rem 1.2rem !important;
 }
 
-/* File uploader */
-[data-testid="stFileUploader"] {
-    border: none !important;
-}
 [data-testid="stFileUploader"] > section > div {
     background: #111827 !important;
     border: 2px dashed #1e2d4a !important;
     border-radius: 14px !important;
     padding: 1.5rem !important;
 }
-[data-testid="stFileUploader"] label {
-    color: #94a3b8 !important;
-    font-size: 0.85rem !important;
-}
 
-/* Metric cards */
 div[data-testid="stMetric"] {
     background: #111827 !important;
     padding: 0.8rem 1rem !important;
     border-radius: 12px !important;
     border: 1px solid #1e2d4a !important;
 }
+
 div[data-testid="stMetricValue"] {
     font-size: 1.3rem !important;
     color: #f1f5f9 !important;
 }
 
-/* Radio group */
-.stRadio [data-baseweb="radio-group"] {
-    background: #111827 !important;
-    border: 1px solid #1e2d4a !important;
-    border-radius: 10px !important;
-    padding: 0.3rem !important;
-}
-
-/* Nodule result card */
 .nodule-result-card {
     background: #111827;
     border: 1px solid #1e2d4a;
@@ -210,15 +244,18 @@ div[data-testid="stMetricValue"] {
     gap: 1.5rem;
     flex-wrap: wrap;
 }
+
 .nodule-measure {
     display: flex;
     flex-direction: column;
 }
+
 .nodule-measure .val {
     font-size: 1rem;
     font-weight: 700;
     color: #f1f5f9;
 }
+
 .nodule-measure .lbl {
     font-size: 0.6rem;
     text-transform: uppercase;
@@ -231,6 +268,7 @@ div[data-testid="stMetricValue"] {
     padding: 0.2rem 0.6rem;
     border-radius: 6px;
 }
+
 .nodule-rec.routine { background: rgba(16,185,129,0.12); color: #10b981; }
 .nodule-rec.followup { background: rgba(245,158,11,0.12); color: #f59e0b; }
 .nodule-rec.urgent { background: rgba(239,68,68,0.12); color: #ef4444; }
@@ -244,21 +282,8 @@ div[data-testid="stMetricValue"] {
     border-top: 1px solid #1e2d4a;
 }
 
-/* Hide default Streamlit elements */
 #MainMenu, footer, header {
     visibility: hidden;
-}
-
-/* Sidebar expand button - make visible */
-button[kind="header"] {
-    display: flex !important;
-    background: #0ea5e9 !important;
-    color: white !important;
-}
-
-/* Fix sidebar collapse/expand */
-.css-1d391kg, .css-1lcbmhc {
-    z-index: 100;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -317,10 +342,6 @@ class OutConv(nn.Module):
 class MemoryEfficientUNet(nn.Module):
     def __init__(self, n_channels=1, n_classes=1, bilinear=True):
         super(MemoryEfficientUNet, self).__init__()
-        self.n_channels = n_channels
-        self.n_classes = n_classes
-        self.bilinear = bilinear
-
         self.inc = DoubleConv(n_channels, 32)
         self.down1 = Down(32, 64)
         self.down2 = Down(64, 128)
@@ -332,7 +353,6 @@ class MemoryEfficientUNet(nn.Module):
         self.up3 = Up(128, 64 // factor, bilinear)
         self.up4 = Up(64, 32, bilinear)
         self.outc = OutConv(32, n_classes)
-
     def forward(self, x):
         x1 = self.inc(x)
         x2 = self.down1(x1)
@@ -343,12 +363,11 @@ class MemoryEfficientUNet(nn.Module):
         x = self.up2(x, x3)
         x = self.up3(x, x2)
         x = self.up4(x, x1)
-        logits = self.outc(x)
-        return logits
+        return self.outc(x)
 
 
 # ============================================================
-# MODEL LOADING - USING best_model.pth
+# MODEL LOADING
 # ============================================================
 GDRIVE_ID = "1ZMXIzhxrvtEwXmbs1G2HrVRMl8-RkKc8"
 MODEL_FN = "best_model.pth"
@@ -362,17 +381,13 @@ def load_model():
                 gdown.download(url, MODEL_FN, quiet=False)
         
         model = MemoryEfficientUNet(n_channels=1, n_classes=1)
-        
-        # Load state dict directly (best_model.pth contains just weights)
         state_dict = torch.load(MODEL_FN, map_location='cpu')
         
-        # Handle different state dict formats
         if isinstance(state_dict, dict) and 'model_state_dict' in state_dict:
             state_dict = state_dict['model_state_dict']
         elif isinstance(state_dict, dict) and 'state_dict' in state_dict:
             state_dict = state_dict['state_dict']
         
-        # Remove 'module.' prefix if present
         if state_dict and 'module.' in list(state_dict.keys())[0]:
             new_state_dict = OrderedDict()
             for k, v in state_dict.items():
@@ -391,6 +406,8 @@ def load_model():
 # ============================================================
 # UTILITIES
 # ============================================================
+PATCH_SIZE = 128
+
 def apply_lung_window(image):
     image = np.clip(image, -1000, 400)
     return ((image + 1000) / 1400).astype(np.float32)
@@ -403,7 +420,7 @@ def segment_slice(model, img, threshold=0.5):
     
     normed = apply_lung_window(normed * 1400 - 1000) if normed.max() > 0.1 else normed
     
-    resized = resize(normed, (128, 128), preserve_range=True)
+    resized = resize(normed, (PATCH_SIZE, PATCH_SIZE), preserve_range=True)
     tensor = torch.FloatTensor(resized).unsqueeze(0).unsqueeze(0)
     
     with torch.no_grad():
@@ -412,35 +429,43 @@ def segment_slice(model, img, threshold=0.5):
     mask = resize((prob > threshold).astype(np.float32), shape, order=0, preserve_range=True)
     return (mask > 0.5).astype(np.uint8)
 
-
-def analyze_3d(mask_3d, spacing_zyx):
+def analyze_3d(mask_3d, spacing_zyx, num_slices):
     sx, sy, sz = spacing_zyx[2], spacing_zyx[1], spacing_zyx[0]
     voxel_vol = sx * sy * sz
     labeled = label(mask_3d, connectivity=2)
     nodules = []
+    
     for rp in regionprops(labeled):
         if rp.area < 10:
             continue
+        
         vol_mm3 = rp.area * voxel_vol
         eq_diam = 2.0 * (3.0 * vol_mm3 / (4.0 * np.pi)) ** (1/3)
         bb = rp.bbox
-        ext_x = (bb[5]-bb[4]) * sx
-        ext_y = (bb[3]-bb[2]) * sy
-        ext_z = (bb[1]-bb[0]) * sz
-        max_diam = max(ext_x, ext_y, ext_z)
+        
+        # FIXED: Use actual slice indices, not scaled values
+        z_min = bb[0]
+        z_max = bb[1]
+        
+        # Ensure slice range is within valid range
+        z_min = max(0, min(z_min, num_slices - 1))
+        z_max = max(z_min + 1, min(z_max, num_slices))
+        
+        ext_z = (z_max - z_min) * sz
+        
         nodules.append({
-            'id': len(nodules)+1,
+            'id': len(nodules) + 1,
             'label_id': rp.label,
             'volume_mm3': vol_mm3,
             'eq_diameter_mm': eq_diam,
-            'max_diameter_mm': max_diam,
+            'max_diameter_mm': ext_z,
             'num_voxels': rp.area,
-            'slice_range': (bb[0], bb[1]),
-            'num_slices': bb[1]-bb[0],
+            'slice_range': (z_min, z_max - 1),
+            'num_slices': z_max - z_min,
             'centroid_zyx': rp.centroid,
         })
+    
     return labeled, nodules
-
 
 def analyze_2d(mask, spacing_xy=None):
     labeled = label(mask, connectivity=2)
@@ -468,7 +493,6 @@ def analyze_2d(mask, spacing_xy=None):
         })
     return nodules
 
-
 def load_volume(zip_file):
     tmp = tempfile.mkdtemp()
     zpath = os.path.join(tmp, "upload.zip")
@@ -493,7 +517,6 @@ def load_volume(zip_file):
     sp_zyx = (sp[2], sp[1], sp[0])
     return arr, sp_zyx, tmp
 
-
 def make_overlay(slice_img, mask_2d, alpha=0.45):
     n = (slice_img - slice_img.min()) / (slice_img.max() - slice_img.min() + 1e-9)
     rgb = np.stack([n, n, n], axis=-1)
@@ -502,7 +525,6 @@ def make_overlay(slice_img, mask_2d, alpha=0.45):
     rgb[m, 1] = np.clip(rgb[m, 1] * 0.25, 0, 1)
     rgb[m, 2] = np.clip(rgb[m, 2] * 0.25, 0, 1)
     return rgb
-
 
 def draw_slice_view(ax, slice_img, labeled_2d, nodules_info, title=""):
     mask_any = (labeled_2d > 0).astype(np.float32) if labeled_2d is not None else np.zeros_like(slice_img)
@@ -543,32 +565,57 @@ def draw_slice_view(ax, slice_img, labeled_2d, nodules_info, title=""):
 
 
 # ============================================================
-# LOGIN PAGE - FIXED VERTICAL ALIGNMENT
+# LOGIN PAGE - COMPLETELY REWRITTEN
 # ============================================================
 def show_login():
+    # Hide all Streamlit default elements
     st.markdown("""
-    <div class="login-wrapper">
-        <div class="login-card">
-            <div class="login-icon"></div>
-            <h2>LungVision AI</h2>
-            <p class="login-sub">Clinical Nodule Segmentation</p>
-        </div>
-    </div>
+    <style>
+        #MainMenu {visibility: hidden;}
+        header {visibility: hidden;}
+        footer {visibility: hidden;}
+        .stApp {margin-top: -50px;}
+    </style>
     """, unsafe_allow_html=True)
-
-    # Center the form using columns
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        with st.form("login_form", clear_on_submit=False):
-            user = st.text_input("Radiologist ID", placeholder="Enter your ID")
-            pwd = st.text_input("Password", type="password", placeholder="Enter password")
-            submitted = st.form_submit_button("Sign In", use_container_width=True)
-            if submitted:
-                if user == "radiologist" and pwd == "hit500":
-                    st.session_state.authenticated = True
-                    st.rerun()
-                else:
-                    st.error("Invalid credentials")
+    
+    # Create full screen login using empty container trick
+    login_placeholder = st.empty()
+    
+    with login_placeholder.container():
+        # Center the login form using columns
+        col1, col2, col3 = st.columns([1, 2, 1])
+        
+        with col2:
+            st.markdown("""
+            <div style="
+                background: linear-gradient(160deg, #111d32 0%, #0b1221 100%);
+                border: 1px solid #1e2d4a;
+                border-radius: 28px;
+                padding: 3rem 2.5rem;
+                text-align: center;
+                margin-top: 15vh;
+                box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            ">
+                <div style="font-size: 4rem; margin-bottom: 1rem;">🫁</div>
+                <h2 style="font-size: 1.8rem; font-weight: 700; margin-bottom: 0.5rem; color: #f1f5f9;">LungVision AI</h2>
+                <p style="color: #64748b; font-size: 0.85rem; margin-bottom: 2rem;">Clinical Nodule Segmentation</p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            with st.form("login_form", clear_on_submit=False):
+                username = st.text_input("Radiologist ID", placeholder="Enter your ID", key="username")
+                password = st.text_input("Password", type="password", placeholder="Enter password", key="password")
+                
+                col_a, col_b, col_c = st.columns([1, 2, 1])
+                with col_b:
+                    submitted = st.form_submit_button("Sign In", use_container_width=True)
+                
+                if submitted:
+                    if username == "radiologist" and password == "hit500":
+                        st.session_state.authenticated = True
+                        st.rerun()
+                    else:
+                        st.error("Invalid credentials")
 
 
 # ============================================================
@@ -661,6 +708,7 @@ def show_app(model):
                 st.error("Could not read volume. Ensure ZIP contains .mhd and .raw files.")
             else:
                 n_slices = vol.shape[0]
+                st.info(f"Volume loaded: {n_slices} slices")
                 
                 prog = st.progress(0)
                 status = st.empty()
@@ -671,7 +719,7 @@ def show_app(model):
                     prog.progress((i + 1) / n_slices)
                 
                 mask_3d = np.stack(all_masks)
-                labeled_3d, nodules = analyze_3d(mask_3d, sp_zyx)
+                labeled_3d, nodules = analyze_3d(mask_3d, sp_zyx, n_slices)
                 
                 status.empty()
                 prog.empty()
@@ -696,7 +744,7 @@ def show_app(model):
                             <div class="nodule-measures">
                                 <div class="nodule-measure"><span class="val">{n['eq_diameter_mm']:.1f} mm</span><span class="lbl">Diameter</span></div>
                                 <div class="nodule-measure"><span class="val">{n['volume_mm3']:.0f} mm³</span><span class="lbl">Volume</span></div>
-                                <div class="nodule-measure"><span class="val">Slices {n['slice_range'][0]}-{n['slice_range'][1]-1}</span><span class="lbl">Range</span></div>
+                                <div class="nodule-measure"><span class="val">Slices {n['slice_range'][0]}-{n['slice_range'][1]}</span><span class="lbl">Range</span></div>
                             </div>
                             <div class="nodule-rec {rec_class}">{rec_text}</div>
                         </div>
@@ -706,7 +754,7 @@ def show_app(model):
                     selected_slice = st.selectbox("View slice", valid_slices, format_func=lambda x: f"Slice {x}")
                     
                     if 0 <= selected_slice < n_slices:
-                        visible_nodules = [n for n in nodules if n['slice_range'][0] <= selected_slice < n['slice_range'][1]]
+                        visible_nodules = [n for n in nodules if n['slice_range'][0] <= selected_slice <= n['slice_range'][1]]
                         
                         col1, col2 = st.columns(2)
                         with col1:
@@ -728,7 +776,7 @@ def show_app(model):
                         "Volume (mm³)": round(n['volume_mm3'], 1),
                         "Diameter (mm)": round(n['eq_diameter_mm'], 2),
                         "Max Diameter (mm)": round(n['max_diameter_mm'], 2),
-                        "Slice Range": f"{n['slice_range'][0]}-{n['slice_range'][1]-1}",
+                        "Slice Range": f"{n['slice_range'][0]}-{n['slice_range'][1]}",
                         "Number of Slices": n['num_slices']
                     } for n in nodules]
                     
