@@ -116,6 +116,17 @@ st.markdown("""
     }
     .login-mode [data-testid="stSidebar"] { display: none; }
     .login-mode header { display: none; }
+    .debug-info {
+        font-family: monospace;
+        font-size: 0.7rem;
+        color: #94a3b8;
+        background: rgba(0,0,0,0.3);
+        padding: 0.5rem;
+        border-radius: 4px;
+        margin-top: 0.5rem;
+        white-space: pre-wrap;
+        word-break: break-all;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -226,7 +237,7 @@ def load_model():
 # UTILITIES
 # ============================================================
 PATCH_SIZE = 128
-DETECTION_THRESHOLD = 0.85
+DETECTION_THRESHOLD = 0.7  # Lower threshold for testing
 
 def apply_lung_window(image):
     image = np.clip(image, -1000, 400)
@@ -248,7 +259,7 @@ def segment_slice(model, img, threshold=DETECTION_THRESHOLD):
         prob = torch.sigmoid(model(tensor)).squeeze().numpy()
     
     mask = resize((prob > threshold).astype(np.float32), shape, order=0, preserve_range=True)
-    return (mask > 0.5).astype(np.uint8)
+    return (mask > 0.5).astype(np.uint8), prob  # Also return probability map for debugging
 
 def analyze_3d_connected(mask_3d, spacing_zyx, volume_shape):
     z_spacing, y_spacing, x_spacing = spacing_zyx
@@ -259,22 +270,18 @@ def analyze_3d_connected(mask_3d, spacing_zyx, volume_shape):
     nodules = []
     
     for region in regionprops(labeled_mask):
-        if region.area < 100:
+        if region.area < 50:
             continue
         
         volume_mm3 = region.area * voxel_volume_mm3
         diameter_mm = 2.0 * (3.0 * volume_mm3 / (4.0 * np.pi)) ** (1/3)
         
-        if diameter_mm < 3.0 or diameter_mm > 30.0:
+        if diameter_mm < 2.0 or diameter_mm > 30.0:
             continue
         
         min_z, min_y, min_x, max_z, max_y, max_x = region.bbox
         min_z = max(0, min_z)
         max_z = min(volume_shape[0], max_z)
-        
-        num_slices = max_z - min_z
-        if num_slices < 2:
-            continue
         
         nodules.append({
             'id': len(nodules) + 1,
@@ -283,8 +290,8 @@ def analyze_3d_connected(mask_3d, spacing_zyx, volume_shape):
             'diameter_mm': diameter_mm,
             'slice_start': int(min_z),
             'slice_end': int(max_z - 1),
-            'num_slices': num_slices,
-            'centroid': region.centroid,  # (z, y, x) coordinates in volume space
+            'num_slices': int(max_z - min_z),
+            'centroid': region.centroid,
             'area': region.area
         })
     
@@ -319,40 +326,28 @@ def load_volume(zip_file):
     
     return volume, spacing_zyx, tmp
 
-def draw_with_matplotlib(img, labeled_mask, nodules_in_slice, title):
-    """
-    Draw CT slice with nodule outlines.
-    Uses the actual mask from labeled_mask for each nodule.
-    """
-    fig, ax = plt.subplots(figsize=(6, 6), facecolor='#0b1120')
+def draw_with_matplotlib(img, labeled_mask, nodules_in_slice, title, debug_info=None):
+    fig, ax = plt.subplots(figsize=(7, 7), facecolor='#0b1120')
     
     img_display = apply_lung_window(img)
     ax.imshow(img_display, cmap='gray')
     
     for nodule in nodules_in_slice:
-        # Get the mask for this specific nodule in this slice
-        if 'label_id' in nodule:
-            nodule_mask = (labeled_mask == nodule['label_id'])
-        else:
-            continue
-        
+        nodule_mask = (labeled_mask == nodule['label_id'])
         ys, xs = np.where(nodule_mask)
-        if len(xs) == 0:
-            continue
-        
-        # Calculate center from the actual mask pixels
-        cx = np.mean(xs)
-        cy = np.mean(ys)
-        
-        # Calculate radius from mask extents
-        width = np.max(xs) - np.min(xs)
-        height = np.max(ys) - np.min(ys)
-        radius = max(width, height) / 2 + 8
-        
-        # Only draw if radius is reasonable (5-80 pixels)
-        if 5 <= radius <= 80:
+        if len(xs) > 0:
+            cx = np.mean(xs)
+            cy = np.mean(ys)
+            width = np.max(xs) - np.min(xs)
+            height = np.max(ys) - np.min(ys)
+            radius = max(width, height) / 2 + 8
+            
+            # Draw circle
             circle = Circle((cx, cy), radius, fill=False, edgecolor='#06b6d4', linewidth=2.5)
             ax.add_patch(circle)
+            
+            # Draw a red dot at the center for verification
+            ax.plot(cx, cy, 'ro', markersize=4)
             
             label_text = f"N{nodule['id']}\n{nodule['diameter_mm']:.1f}mm"
             ax.annotate(
@@ -423,7 +418,7 @@ def show_app(model):
             st.session_state.clear()
             st.rerun()
         st.markdown("---")
-        st.info("Upload CT volume (MHD + RAW as ZIP) for automated nodule detection.")
+        st.info("Upload CT volume (MHD + RAW as ZIP)")
 
     st.markdown('<div class="section-label">Clinical CT Upload</div>', unsafe_allow_html=True)
     
@@ -452,10 +447,13 @@ def show_app(model):
             prog = st.progress(0)
             status = st.empty()
             all_masks = []
+            all_probs = []
             
             for i in range(num_slices):
                 status.text(f"Analyzing slice {i+1}/{num_slices}...")
-                all_masks.append(segment_slice(model, volume[i]))
+                mask, prob = segment_slice(model, volume[i])
+                all_masks.append(mask)
+                all_probs.append(prob)
                 prog.progress((i + 1) / num_slices)
             
             mask_3d = np.stack(all_masks)
@@ -517,7 +515,6 @@ def show_app(model):
                 st.markdown('<div class="section-label">Slice Review</div>', unsafe_allow_html=True)
                 slice_idx = st.slider("Select slice to review", 0, num_slices - 1, num_slices // 2)
                 
-                # Get nodules that appear in this slice using the labeled mask
                 slice_labeled = labeled_3d[slice_idx]
                 unique_labels = np.unique(slice_labeled)
                 
@@ -527,14 +524,26 @@ def show_app(model):
                         continue
                     n_data = next((n for n in nodules if n['label_id'] == ul), None)
                     if n_data:
-                        # Pass the full nodule data and the slice-specific mask
                         nodules_in_slice.append({
                             'id': n_data['id'],
                             'label_id': n_data['label_id'],
-                            'diameter_mm': n_data['diameter_mm'],
-                            'slice_start': n_data['slice_start'],
-                            'slice_end': n_data['slice_end']
+                            'diameter_mm': n_data['diameter_mm']
                         })
+
+                # Debug info
+                with st.expander("Debug Information", expanded=True):
+                    st.markdown(f"**Slice {slice_idx} Debug**")
+                    st.markdown(f"- Number of unique labels in mask: {len(unique_labels)}")
+                    st.markdown(f"- Nodules in this slice: {len(nodules_in_slice)}")
+                    
+                    for n in nodules_in_slice:
+                        nodule_mask = (slice_labeled == n['label_id'])
+                        mask_area = np.sum(nodule_mask)
+                        ys, xs = np.where(nodule_mask)
+                        if len(xs) > 0:
+                            st.markdown(f"  - N{n['id']}: mask area={mask_area} pixels, center=({np.mean(xs):.1f}, {np.mean(ys):.1f})")
+                        else:
+                            st.markdown(f"  - N{n['id']}: mask has NO pixels in this slice (should not happen)")
 
                 col1, col2 = st.columns(2)
                 
@@ -548,12 +557,10 @@ def show_app(model):
                     plt.close(fig)
 
                 with col2:
-                    # Pass the labeled mask and the nodules list
                     fig2, ax2 = plt.subplots(figsize=(6, 6), facecolor='#0b1120')
                     img_display = apply_lung_window(volume[slice_idx])
                     ax2.imshow(img_display, cmap='gray')
                     
-                    # Draw circles using the actual mask from labeled_3d
                     for nodule in nodules_in_slice:
                         nodule_mask = (slice_labeled == nodule['label_id'])
                         ys, xs = np.where(nodule_mask)
@@ -564,17 +571,23 @@ def show_app(model):
                             height = np.max(ys) - np.min(ys)
                             radius = max(width, height) / 2 + 8
                             
-                            if 5 <= radius <= 80:
-                                circle = Circle((cx, cy), radius, fill=False, edgecolor='#06b6d4', linewidth=2.5)
-                                ax2.add_patch(circle)
-                                
-                                label_text = f"N{nodule['id']}\n{nodule['diameter_mm']:.1f}mm"
-                                ax2.annotate(
-                                    label_text,
-                                    xy=(cx, cy), xytext=(cx + radius + 8, cy - radius),
-                                    fontsize=9, fontweight='600', color='#f1f5f9',
-                                    bbox=dict(boxstyle='round,pad=0.3', facecolor='#0f172a', edgecolor='#06b6d4', alpha=0.9),
-                                )
+                            circle = Circle((cx, cy), radius, fill=False, edgecolor='#06b6d4', linewidth=2.5)
+                            ax2.add_patch(circle)
+                            
+                            # Red dot at center
+                            ax2.plot(cx, cy, 'ro', markersize=4)
+                            
+                            label_text = f"N{nodule['id']}\n{nodule['diameter_mm']:.1f}mm"
+                            ax2.annotate(
+                                label_text,
+                                xy=(cx, cy), xytext=(cx + radius + 8, cy - radius),
+                                fontsize=9, fontweight='600', color='#f1f5f9',
+                                bbox=dict(boxstyle='round,pad=0.3', facecolor='#0f172a', edgecolor='#06b6d4', alpha=0.9),
+                            )
+                        else:
+                            # This should not happen - draw warning
+                            ax2.text(0.5, 0.5, f"Nodule {nodule['id']} has no mask in this slice", 
+                                    transform=ax2.transAxes, color='red', ha='center')
                     
                     ax2.set_title(f"Slice {slice_idx} - {len(nodules_in_slice)} Nodule(s)", color='#f1f5f9', fontsize=12)
                     ax2.axis('off')
@@ -591,13 +604,7 @@ def show_app(model):
                 } for n in nodules])
                 
                 csv = df.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    "Export Report (CSV)", 
-                    csv, 
-                    f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", 
-                    "text/csv", 
-                    use_container_width=True
-                )
+                st.download_button("Export Report (CSV)", csv, f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", "text/csv", use_container_width=True)
             else:
                 st.info("No nodules detected.")
 
