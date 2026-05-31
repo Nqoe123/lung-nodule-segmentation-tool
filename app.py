@@ -186,20 +186,17 @@ class MemoryEfficientUNet(nn.Module):
 
 
 # ============================================================
-# MODEL LOADING - LOCAL FILE ONLY (no gdown)
+# MODEL LOADING - LOCAL FILE ONLY
 # ============================================================
 MODEL_FN = "best_model.pth"
 
 @st.cache_resource
 def load_model():
     try:
-        # Check if model file exists in the same directory
         if not os.path.exists(MODEL_FN):
-            st.error(f"Model file '{MODEL_FN}' not found. Please upload it to the repository.")
+            st.error(f"Model file '{MODEL_FN}' not found.")
             st.info("Make sure best_model.pth is in the same folder as app.py")
             return None
-        
-        st.info(f"Loading model from {MODEL_FN}...")
         
         model = MemoryEfficientUNet(n_channels=1, n_classes=1)
         state_dict = torch.load(MODEL_FN, map_location='cpu')
@@ -237,7 +234,7 @@ def apply_lung_window(image):
     image = np.clip(image, -1000, 400)
     return ((image + 1000) / 1400).astype(np.float32)
 
-def segment_slice(model, img, threshold=0.5):
+def segment_slice(model, img, threshold=0.75):  # Increased from 0.5 to 0.75
     shape = img.shape
     normed = img.astype(np.float32)
     
@@ -264,11 +261,16 @@ def analyze_3d_connected(mask_3d, spacing_zyx, volume_shape):
     nodules = []
     
     for region in regionprops(labeled_mask):
-        if region.area < 10:
+        # Increased minimum area from 10 to 100 pixels
+        if region.area < 100:
             continue
         
         volume_mm3 = region.area * voxel_volume_mm3
+        
+        # Skip very small nodules (< 3mm diameter)
         diameter_mm = 2.0 * (3.0 * volume_mm3 / (4.0 * np.pi)) ** (1/3)
+        if diameter_mm < 3.0:
+            continue
         
         min_z, min_y, min_x, max_z, max_y, max_x = region.bbox
         min_z = max(0, min_z)
