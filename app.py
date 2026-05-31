@@ -10,14 +10,12 @@ from scipy.ndimage import binary_closing
 import tempfile
 import SimpleITK as sitk
 from collections import OrderedDict
-from PIL import Image
+from PIL import Image, ImageDraw
 import warnings
 from datetime import datetime
 import zipfile
 import os
 import gdown
-import matplotlib.pyplot as plt
-from matplotlib.patches import Circle
 import shutil
 
 warnings.filterwarnings('ignore')
@@ -119,15 +117,6 @@ st.markdown("""
     }
     .login-mode [data-testid="stSidebar"] { display: none; }
     .login-mode header { display: none; }
-    .spacing-info {
-        font-family: monospace;
-        font-size: 0.7rem;
-        color: #38bdf8;
-        background: rgba(0,0,0,0.3);
-        padding: 0.2rem 0.5rem;
-        border-radius: 4px;
-        display: inline-block;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -320,11 +309,15 @@ def load_volume(zip_file):
     
     return volume, spacing_zyx, tmp
 
-def draw_with_matplotlib(img, mask, nodules_in_slice, title):
-    fig, ax = plt.subplots(figsize=(6, 6), facecolor='#0b1120')
+def create_overlay_image_pil(slice_img, nodules_in_slice):
+    """Create overlay image using PIL (no matplotlib)"""
+    # Normalize to 0-255
+    img_norm = (slice_img - slice_img.min()) / (slice_img.max() - slice_img.min() + 1e-9)
+    img_uint8 = (img_norm * 255).astype(np.uint8)
     
-    img_display = apply_lung_window(img)
-    ax.imshow(img_display, cmap='gray')
+    # Convert to RGB PIL image
+    img_pil = Image.fromarray(img_uint8).convert('RGB')
+    draw = ImageDraw.Draw(img_pil)
     
     for nodule in nodules_in_slice:
         if 'mask_in_slice' not in nodule:
@@ -335,24 +328,18 @@ def draw_with_matplotlib(img, mask, nodules_in_slice, title):
         if len(xs) == 0:
             continue
         
-        cx = np.mean(xs)
-        cy = np.mean(ys)
-        radius = max((np.max(xs) - np.min(xs)) / 2, (np.max(ys) - np.min(ys)) / 2) + 8
+        cx = int(np.mean(xs))
+        cy = int(np.mean(ys))
+        radius = int(max((np.max(xs) - np.min(xs)) / 2, (np.max(ys) - np.min(ys)) / 2)) + 8
         
-        circle = Circle((cx, cy), radius, fill=False, edgecolor='#06b6d4', linewidth=2.5)
-        ax.add_patch(circle)
+        # Draw circle
+        draw.ellipse([cx - radius, cy - radius, cx + radius, cy + radius], outline=(6, 182, 212), width=2)
         
+        # Draw text
         label_text = f"N{nodule['id']}\n{nodule['diameter_mm']:.1f}mm"
-        ax.annotate(
-            label_text,
-            xy=(cx, cy), xytext=(cx + radius + 8, cy - radius),
-            fontsize=9, fontweight='600', color='#f1f5f9',
-            bbox=dict(boxstyle='round,pad=0.3', facecolor='#0f172a', edgecolor='#06b6d4', alpha=0.9),
-        )
+        draw.text((cx + radius + 5, cy - radius), label_text, fill=(241, 245, 249))
     
-    ax.set_title(title, color='#f1f5f9', fontsize=12)
-    ax.axis('off')
-    return fig
+    return img_pil
 
 
 # ============================================================
@@ -410,16 +397,13 @@ def show_app(model):
             st.rerun()
         st.markdown("---")
         st.info("Upload CT volume (MHD + RAW as ZIP) for automated nodule detection.")
-        st.markdown("---")
-        st.caption("Clinical measurements in mm and mm³ using DICOM metadata.")
 
     st.markdown('<div class="section-label">Clinical CT Upload</div>', unsafe_allow_html=True)
     
     upzip = st.file_uploader(
         "Upload CT Volume (ZIP with .mhd and .raw files)", 
         type=["zip"], 
-        label_visibility="collapsed",
-        help="From DICOM series converted to MHD/RAW format"
+        label_visibility="collapsed"
     )
 
     if upzip:
@@ -427,7 +411,7 @@ def show_app(model):
             volume, spacing_zyx, temp_dir = load_volume(upzip)
         
         if volume is None:
-            st.error("Invalid CT volume. Ensure ZIP contains .mhd and .raw files from a DICOM series.")
+            st.error("Invalid CT volume. Ensure ZIP contains .mhd and .raw files.")
         else:
             num_slices = volume.shape[0]
             st.success(f"CT Loaded: {num_slices} slices")
@@ -498,7 +482,7 @@ def show_app(model):
                         <span class="badge {badge_class}">{risk_label}</span>
                     </div>
                     <div style="margin-left: 60px; margin-bottom: 10px; font-size: 0.7rem; color: #94a3b8;">
-                        Clinical recommendation: {rec}
+                        Recommendation: {rec}
                     </div>
                     """, unsafe_allow_html=True)
                 st.markdown('</div>', unsafe_allow_html=True)
@@ -522,42 +506,12 @@ def show_app(model):
                 col1, col2 = st.columns(2)
                 
                 with col1:
-                    fig, ax = plt.subplots(figsize=(6, 6), facecolor='#0b1120')
                     img_display = apply_lung_window(volume[slice_idx])
-                    ax.imshow(img_display, cmap='gray')
-                    ax.set_title(f"Slice {slice_idx} - Original", color='#f1f5f9', fontsize=12)
-                    ax.axis('off')
-                    st.pyplot(fig)
-                    plt.close(fig)
+                    st.image(img_display, caption=f"Slice {slice_idx} - Original", use_container_width=True, clamp=True)
 
                 with col2:
-                    fig2, ax2 = plt.subplots(figsize=(6, 6), facecolor='#0b1120')
-                    img_display = apply_lung_window(volume[slice_idx])
-                    ax2.imshow(img_display, cmap='gray')
-                    
-                    for n in nodules_in_slice:
-                        nodule_mask = n['mask_in_slice']
-                        ys, xs = np.where(nodule_mask)
-                        if len(xs) > 0:
-                            cx = np.mean(xs)
-                            cy = np.mean(ys)
-                            radius = max((np.max(xs) - np.min(xs)) / 2, (np.max(ys) - np.min(ys)) / 2) + 8
-                            
-                            circle = Circle((cx, cy), radius, fill=False, edgecolor='#06b6d4', linewidth=2.5)
-                            ax2.add_patch(circle)
-                            
-                            label_text = f"N{n['id']}\n{n['diameter_mm']:.1f}mm"
-                            ax2.annotate(
-                                label_text,
-                                xy=(cx, cy), xytext=(cx + radius + 8, cy - radius),
-                                fontsize=9, fontweight='600', color='#f1f5f9',
-                                bbox=dict(boxstyle='round,pad=0.3', facecolor='#0f172a', edgecolor='#06b6d4', alpha=0.9),
-                            )
-                    
-                    ax2.set_title(f"Slice {slice_idx} - {len(nodules_in_slice)} Nodule(s) Detected", color='#f1f5f9', fontsize=12)
-                    ax2.axis('off')
-                    st.pyplot(fig2)
-                    plt.close(fig2)
+                    overlay_img = create_overlay_image_pil(volume[slice_idx], nodules_in_slice)
+                    st.image(overlay_img, caption=f"Slice {slice_idx} - {len(nodules_in_slice)} Nodule(s) Detected", use_container_width=True)
                 
                 # Export clinical report
                 df = pd.DataFrame([{
