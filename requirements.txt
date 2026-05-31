@@ -1,11 +1,10 @@
 streamlit
 torch
-torchvision
 numpy
 pillow
-matplotlib
 scikit-image
 gdown
 SimpleITK
 pandas
-pydicom
+scipy
+plotly
