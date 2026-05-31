@@ -33,9 +33,7 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    .stApp {
-        background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
-    }
+    .stApp { background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%); }
     #MainMenu, header, footer { visibility: hidden; }
     .stDeployButton { display: none; }
     [data-testid="stSidebar"] {
@@ -118,13 +116,6 @@ st.markdown("""
     }
     .login-mode [data-testid="stSidebar"] { display: none; }
     .login-mode header { display: none; }
-    .warning-box {
-        background: rgba(245, 158, 11, 0.15);
-        border-left: 3px solid #f59e0b;
-        padding: 0.5rem 1rem;
-        border-radius: 8px;
-        margin-bottom: 1rem;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -202,7 +193,6 @@ def load_model():
     try:
         if not os.path.exists(MODEL_FN):
             st.error(f"Model file '{MODEL_FN}' not found.")
-            st.info("Make sure best_model.pth is in the same folder as app.py")
             return None
         
         model = MemoryEfficientUNet(n_channels=1, n_classes=1)
@@ -233,10 +223,10 @@ def load_model():
 
 
 # ============================================================
-# UTILITIES - MAXIMUM THRESHOLD (0.95)
+# UTILITIES
 # ============================================================
 PATCH_SIZE = 128
-DETECTION_THRESHOLD = 0.95  # HIGHEST POSSIBLE THRESHOLD
+DETECTION_THRESHOLD = 0.85
 
 def apply_lung_window(image):
     image = np.clip(image, -1000, 400)
@@ -269,24 +259,21 @@ def analyze_3d_connected(mask_3d, spacing_zyx, volume_shape):
     nodules = []
     
     for region in regionprops(labeled_mask):
-        # Aggressive filtering
-        if region.area < 500:  # Minimum 500 pixels (very large)
+        if region.area < 100:
             continue
         
         volume_mm3 = region.area * voxel_volume_mm3
         diameter_mm = 2.0 * (3.0 * volume_mm3 / (4.0 * np.pi)) ** (1/3)
         
-        # Only keep nodules between 5mm and 25mm (most clinically significant range)
-        if diameter_mm < 5.0 or diameter_mm > 25.0:
+        if diameter_mm < 3.0 or diameter_mm > 30.0:
             continue
         
         min_z, min_y, min_x, max_z, max_y, max_x = region.bbox
         min_z = max(0, min_z)
         max_z = min(volume_shape[0], max_z)
         
-        # Must span at least 3 slices
         num_slices = max_z - min_z
-        if num_slices < 3:
+        if num_slices < 2:
             continue
         
         nodules.append({
@@ -297,7 +284,7 @@ def analyze_3d_connected(mask_3d, spacing_zyx, volume_shape):
             'slice_start': int(min_z),
             'slice_end': int(max_z - 1),
             'num_slices': num_slices,
-            'centroid': region.centroid,
+            'centroid': region.centroid,  # (z, y, x) coordinates in volume space
             'area': region.area
         })
     
@@ -332,30 +319,38 @@ def load_volume(zip_file):
     
     return volume, spacing_zyx, tmp
 
-def draw_with_matplotlib(img, mask, nodules_in_slice, title):
+def draw_with_matplotlib(img, labeled_mask, nodules_in_slice, title):
+    """
+    Draw CT slice with nodule outlines.
+    Uses the actual mask from labeled_mask for each nodule.
+    """
     fig, ax = plt.subplots(figsize=(6, 6), facecolor='#0b1120')
     
     img_display = apply_lung_window(img)
     ax.imshow(img_display, cmap='gray')
     
     for nodule in nodules_in_slice:
-        if 'mask_in_slice' not in nodule:
+        # Get the mask for this specific nodule in this slice
+        if 'label_id' in nodule:
+            nodule_mask = (labeled_mask == nodule['label_id'])
+        else:
             continue
         
-        nodule_mask = nodule['mask_in_slice']
         ys, xs = np.where(nodule_mask)
         if len(xs) == 0:
             continue
         
+        # Calculate center from the actual mask pixels
         cx = np.mean(xs)
         cy = np.mean(ys)
         
+        # Calculate radius from mask extents
         width = np.max(xs) - np.min(xs)
         height = np.max(ys) - np.min(ys)
-        radius = max(width, height) / 2 + 5
+        radius = max(width, height) / 2 + 8
         
-        # Only draw if radius is reasonable (10-60 pixels)
-        if 10 <= radius <= 60:
+        # Only draw if radius is reasonable (5-80 pixels)
+        if 5 <= radius <= 80:
             circle = Circle((cx, cy), radius, fill=False, edgecolor='#06b6d4', linewidth=2.5)
             ax.add_patch(circle)
             
@@ -429,10 +424,6 @@ def show_app(model):
             st.rerun()
         st.markdown("---")
         st.info("Upload CT volume (MHD + RAW as ZIP) for automated nodule detection.")
-        st.markdown("---")
-        st.caption(f"Detection threshold: {DETECTION_THRESHOLD} (maximum confidence)")
-        st.caption("Minimum nodule size: 5mm diameter")
-        st.caption("Minimum slices: 3 consecutive slices")
 
     st.markdown('<div class="section-label">Clinical CT Upload</div>', unsafe_allow_html=True)
     
@@ -526,18 +517,24 @@ def show_app(model):
                 st.markdown('<div class="section-label">Slice Review</div>', unsafe_allow_html=True)
                 slice_idx = st.slider("Select slice to review", 0, num_slices - 1, num_slices // 2)
                 
-                nodules_in_slice = []
+                # Get nodules that appear in this slice using the labeled mask
                 slice_labeled = labeled_3d[slice_idx]
                 unique_labels = np.unique(slice_labeled)
+                
+                nodules_in_slice = []
                 for ul in unique_labels:
                     if ul == 0:
                         continue
                     n_data = next((n for n in nodules if n['label_id'] == ul), None)
                     if n_data:
-                        nodule_mask_in_slice = (slice_labeled == ul)
-                        n_data_copy = n_data.copy()
-                        n_data_copy['mask_in_slice'] = nodule_mask_in_slice
-                        nodules_in_slice.append(n_data_copy)
+                        # Pass the full nodule data and the slice-specific mask
+                        nodules_in_slice.append({
+                            'id': n_data['id'],
+                            'label_id': n_data['label_id'],
+                            'diameter_mm': n_data['diameter_mm'],
+                            'slice_start': n_data['slice_start'],
+                            'slice_end': n_data['slice_end']
+                        })
 
                 col1, col2 = st.columns(2)
                 
@@ -551,23 +548,27 @@ def show_app(model):
                     plt.close(fig)
 
                 with col2:
+                    # Pass the labeled mask and the nodules list
                     fig2, ax2 = plt.subplots(figsize=(6, 6), facecolor='#0b1120')
                     img_display = apply_lung_window(volume[slice_idx])
                     ax2.imshow(img_display, cmap='gray')
                     
-                    for n in nodules_in_slice:
-                        nodule_mask = n['mask_in_slice']
+                    # Draw circles using the actual mask from labeled_3d
+                    for nodule in nodules_in_slice:
+                        nodule_mask = (slice_labeled == nodule['label_id'])
                         ys, xs = np.where(nodule_mask)
                         if len(xs) > 0:
                             cx = np.mean(xs)
                             cy = np.mean(ys)
-                            radius = max((np.max(xs) - np.min(xs)) / 2, (np.max(ys) - np.min(ys)) / 2) + 5
+                            width = np.max(xs) - np.min(xs)
+                            height = np.max(ys) - np.min(ys)
+                            radius = max(width, height) / 2 + 8
                             
-                            if 8 <= radius <= 60:
+                            if 5 <= radius <= 80:
                                 circle = Circle((cx, cy), radius, fill=False, edgecolor='#06b6d4', linewidth=2.5)
                                 ax2.add_patch(circle)
                                 
-                                label_text = f"N{n['id']}\n{n['diameter_mm']:.1f}mm"
+                                label_text = f"N{nodule['id']}\n{nodule['diameter_mm']:.1f}mm"
                                 ax2.annotate(
                                     label_text,
                                     xy=(cx, cy), xytext=(cx + radius + 8, cy - radius),
@@ -598,7 +599,7 @@ def show_app(model):
                     use_container_width=True
                 )
             else:
-                st.info("No nodules detected with high confidence.")
+                st.info("No nodules detected.")
 
 
 # ============================================================
