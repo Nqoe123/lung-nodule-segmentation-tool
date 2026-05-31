@@ -6,7 +6,8 @@ import numpy as np
 import pandas as pd
 from skimage.transform import resize
 from skimage.measure import label, regionprops
-from scipy.ndimage import binary_closing
+from scipy.ndimage import binary_closing, binary_dilation
+from scipy import ndimage
 import tempfile
 import SimpleITK as sitk
 from collections import OrderedDict
@@ -222,14 +223,46 @@ def load_model():
 
 
 # ============================================================
-# UTILITIES
+# UTILITIES WITH ENHANCED MASK EXPANSION
 # ============================================================
 PATCH_SIZE = 128
-DETECTION_THRESHOLD = 0.7
+DETECTION_THRESHOLD = 0.65  # Slightly lower to capture more
 
 def apply_lung_window(image):
     image = np.clip(image, -1000, 400)
     return ((image + 1000) / 1400).astype(np.float32)
+
+def expand_mask_to_nodule(mask, original_img, expansion_iterations=5):
+    """
+    Expand the mask using morphological dilation to cover the full nodule.
+    Also use edge detection to find nodule boundaries.
+    """
+    # Binary dilation
+    struct = np.ones((5, 5))  # 5x5 structuring element
+    expanded = binary_dilation(mask, structure=struct, iterations=expansion_iterations).astype(np.uint8)
+    
+    # Use edge detection on original image to find potential nodule boundaries
+    from skimage import filters
+    edges = filters.sobel(original_img)
+    
+    # Find connected components and expand to include edge boundaries
+    labeled = label(expanded, connectivity=2)
+    for region in regionprops(labeled):
+        if region.area > 0:
+            # Get bounding box and expand
+            min_r, min_c, max_r, max_c = region.bbox
+            # Expand bbox by 20%
+            h = max_r - min_r
+            w = max_c - min_c
+            min_r = max(0, min_r - int(h * 0.3))
+            max_r = min(original_img.shape[0], max_r + int(h * 0.3))
+            min_c = max(0, min_c - int(w * 0.3))
+            max_c = min(original_img.shape[1], max_c + int(w * 0.3))
+            
+            # Fill the expanded region
+            expanded[min_r:max_r, min_c:max_c] = 1
+    
+    return expanded
 
 def segment_slice(model, img, threshold=DETECTION_THRESHOLD):
     shape = img.shape
@@ -247,18 +280,23 @@ def segment_slice(model, img, threshold=DETECTION_THRESHOLD):
         prob = torch.sigmoid(model(tensor)).squeeze().numpy()
     
     mask = resize((prob > threshold).astype(np.float32), shape, order=0, preserve_range=True)
-    return (mask > 0.5).astype(np.uint8), prob
+    binary_mask = (mask > 0.5).astype(np.uint8)
+    
+    # Expand mask to cover full nodule
+    expanded_mask = expand_mask_to_nodule(binary_mask, img, expansion_iterations=4)
+    
+    return binary_mask, expanded_mask, prob
 
 def analyze_3d_connected(mask_3d, spacing_zyx, volume_shape):
     z_spacing, y_spacing, x_spacing = spacing_zyx
     voxel_volume_mm3 = x_spacing * y_spacing * z_spacing
     
-    mask_3d_closed = binary_closing(mask_3d, structure=np.ones((3, 1, 1))).astype(np.uint8)
+    mask_3d_closed = binary_closing(mask_3d, structure=np.ones((3, 3, 3))).astype(np.uint8)
     labeled_mask = label(mask_3d_closed, connectivity=2)
     nodules = []
     
     for region in regionprops(labeled_mask):
-        if region.area < 30:
+        if region.area < 50:
             continue
         
         volume_mm3 = region.area * voxel_volume_mm3
@@ -317,22 +355,19 @@ def load_volume(zip_file):
 def create_overlay_image(slice_img, mask, alpha=0.6):
     """
     Create a red overlay ONLY where the mask is present.
-    No black overlay - preserves the CT image everywhere else.
     """
-    # Normalize slice to 0-255 range for display
+    # Normalize slice to 0-255 range
     slice_norm = (slice_img - slice_img.min()) / (slice_img.max() - slice_img.min() + 1e-9)
     slice_uint8 = (slice_norm * 255).astype(np.uint8)
     
-    # Create RGB image (grayscale CT)
+    # Create RGB image
     rgb = np.stack([slice_uint8, slice_uint8, slice_uint8], axis=-1).astype(np.float32)
     
-    # Where mask is present, apply red overlay
+    # Apply red overlay on mask
     mask_bool = mask > 0
-    
-    # Apply red color to mask regions only
-    rgb[mask_bool, 0] = np.clip(rgb[mask_bool, 0] * 0.3 + 200, 0, 255)  # Red channel
-    rgb[mask_bool, 1] = np.clip(rgb[mask_bool, 1] * 0.2, 0, 255)  # Green channel
-    rgb[mask_bool, 2] = np.clip(rgb[mask_bool, 2] * 0.2, 0, 255)  # Blue channel
+    rgb[mask_bool, 0] = np.clip(rgb[mask_bool, 0] * 0.3 + 200, 0, 255)
+    rgb[mask_bool, 1] = np.clip(rgb[mask_bool, 1] * 0.2, 0, 255)
+    rgb[mask_bool, 2] = np.clip(rgb[mask_bool, 2] * 0.2, 0, 255)
     
     return rgb.astype(np.uint8)
 
@@ -422,11 +457,12 @@ def show_app(model):
             prog = st.progress(0)
             status = st.empty()
             all_masks = []
+            all_expanded_masks = []
             
             for i in range(num_slices):
                 status.text(f"Analyzing slice {i+1}/{num_slices}...")
-                mask, _ = segment_slice(model, volume[i])
-                all_masks.append(mask)
+                orig_mask, expanded_mask, _ = segment_slice(model, volume[i])
+                all_masks.append(expanded_mask)  # Use expanded mask for better coverage
                 prog.progress((i + 1) / num_slices)
             
             mask_3d = np.stack(all_masks)
@@ -491,10 +527,9 @@ def show_app(model):
                 # Get the mask for this slice
                 slice_mask = mask_3d[slice_idx]
                 
-                # Create overlay (red only on mask, no black)
+                # Create overlay
                 overlay_img = create_overlay_image(volume[slice_idx], slice_mask)
                 
-                # Display side by side
                 col1, col2 = st.columns(2)
                 
                 with col1:
@@ -509,12 +544,11 @@ def show_app(model):
                 with col2:
                     fig2, ax2 = plt.subplots(figsize=(6, 6), facecolor='#0b1120')
                     ax2.imshow(overlay_img)
-                    ax2.set_title(f"Slice {slice_idx} - AI Detection (Red = Nodule)", color='#f1f5f9', fontsize=12)
+                    ax2.set_title(f"Slice {slice_idx} - AI Detection", color='#f1f5f9', fontsize=12)
                     ax2.axis('off')
                     st.pyplot(fig2)
                     plt.close(fig2)
                 
-                # Create CSV report
                 df = pd.DataFrame([{
                     "Nodule ID": n['id'],
                     "Diameter (mm)": round(n['diameter_mm'], 2),
