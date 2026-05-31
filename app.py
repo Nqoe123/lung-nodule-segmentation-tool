@@ -118,14 +118,12 @@ st.markdown("""
     }
     .login-mode [data-testid="stSidebar"] { display: none; }
     .login-mode header { display: none; }
-    .debug-info {
-        font-family: monospace;
-        font-size: 0.7rem;
-        color: #94a3b8;
-        background: rgba(0,0,0,0.3);
-        padding: 0.5rem;
-        border-radius: 4px;
-        margin-top: 0.5rem;
+    .warning-box {
+        background: rgba(245, 158, 11, 0.15);
+        border-left: 3px solid #f59e0b;
+        padding: 0.5rem 1rem;
+        border-radius: 8px;
+        margin-bottom: 1rem;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -195,7 +193,7 @@ class MemoryEfficientUNet(nn.Module):
 
 
 # ============================================================
-# MODEL LOADING - LOCAL FILE ONLY
+# MODEL LOADING
 # ============================================================
 MODEL_FN = "best_model.pth"
 
@@ -235,15 +233,16 @@ def load_model():
 
 
 # ============================================================
-# UTILITIES
+# UTILITIES - MAXIMUM THRESHOLD (0.95)
 # ============================================================
 PATCH_SIZE = 128
+DETECTION_THRESHOLD = 0.95  # HIGHEST POSSIBLE THRESHOLD
 
 def apply_lung_window(image):
     image = np.clip(image, -1000, 400)
     return ((image + 1000) / 1400).astype(np.float32)
 
-def segment_slice(model, img, threshold=0.85):  # Very high threshold
+def segment_slice(model, img, threshold=DETECTION_THRESHOLD):
     shape = img.shape
     normed = img.astype(np.float32)
     
@@ -269,29 +268,25 @@ def analyze_3d_connected(mask_3d, spacing_zyx, volume_shape):
     labeled_mask = label(mask_3d_closed, connectivity=2)
     nodules = []
     
-    # Debug: Count total regions
-    total_regions = len(regionprops(labeled_mask))
-    st.caption(f"Debug: Total regions detected: {total_regions}")
-    
     for region in regionprops(labeled_mask):
-        # Very strict filtering
-        if region.area < 200:  # Minimum 200 pixels
+        # Aggressive filtering
+        if region.area < 500:  # Minimum 500 pixels (very large)
             continue
         
         volume_mm3 = region.area * voxel_volume_mm3
         diameter_mm = 2.0 * (3.0 * volume_mm3 / (4.0 * np.pi)) ** (1/3)
         
-        # Only keep nodules between 3mm and 30mm (clinical range)
-        if diameter_mm < 4.0 or diameter_mm > 30.0:
+        # Only keep nodules between 5mm and 25mm (most clinically significant range)
+        if diameter_mm < 5.0 or diameter_mm > 25.0:
             continue
         
         min_z, min_y, min_x, max_z, max_y, max_x = region.bbox
         min_z = max(0, min_z)
         max_z = min(volume_shape[0], max_z)
         
-        # Only keep if spans at least 2 slices (reduces noise)
+        # Must span at least 3 slices
         num_slices = max_z - min_z
-        if num_slices < 2:
+        if num_slices < 3:
             continue
         
         nodules.append({
@@ -307,12 +302,6 @@ def analyze_3d_connected(mask_3d, spacing_zyx, volume_shape):
         })
     
     nodules.sort(key=lambda x: x['slice_start'])
-    
-    # Debug output
-    st.caption(f"Debug: Nodules after filtering: {len(nodules)}")
-    for n in nodules[:5]:
-        st.caption(f"  N{n['id']}: slices {n['slice_start']}-{n['slice_end']}, diam={n['diameter_mm']:.1f}mm, area={n['area']}px")
-    
     return labeled_mask, nodules
 
 def load_volume(zip_file):
@@ -361,13 +350,12 @@ def draw_with_matplotlib(img, mask, nodules_in_slice, title):
         cx = np.mean(xs)
         cy = np.mean(ys)
         
-        # Calculate radius based on actual mask size
         width = np.max(xs) - np.min(xs)
         height = np.max(ys) - np.min(ys)
         radius = max(width, height) / 2 + 5
         
-        # Only draw if radius is reasonable (not too large)
-        if radius < 100 and radius > 5:
+        # Only draw if radius is reasonable (10-60 pixels)
+        if 10 <= radius <= 60:
             circle = Circle((cx, cy), radius, fill=False, edgecolor='#06b6d4', linewidth=2.5)
             ax.add_patch(circle)
             
@@ -441,12 +429,10 @@ def show_app(model):
             st.rerun()
         st.markdown("---")
         st.info("Upload CT volume (MHD + RAW as ZIP) for automated nodule detection.")
-        
-        # Add threshold slider for debugging
         st.markdown("---")
-        st.markdown("### Advanced Settings")
-        threshold = st.slider("Detection Threshold", 0.5, 0.95, 0.85, 0.05)
-        st.caption(f"Higher threshold = fewer false positives")
+        st.caption(f"Detection threshold: {DETECTION_THRESHOLD} (maximum confidence)")
+        st.caption("Minimum nodule size: 5mm diameter")
+        st.caption("Minimum slices: 3 consecutive slices")
 
     st.markdown('<div class="section-label">Clinical CT Upload</div>', unsafe_allow_html=True)
     
@@ -478,7 +464,7 @@ def show_app(model):
             
             for i in range(num_slices):
                 status.text(f"Analyzing slice {i+1}/{num_slices}...")
-                all_masks.append(segment_slice(model, volume[i], threshold=threshold))
+                all_masks.append(segment_slice(model, volume[i]))
                 prog.progress((i + 1) / num_slices)
             
             mask_3d = np.stack(all_masks)
@@ -575,10 +561,9 @@ def show_app(model):
                         if len(xs) > 0:
                             cx = np.mean(xs)
                             cy = np.mean(ys)
-                            radius = max((np.max(xs) - np.min(xs)) / 2, (np.max(ys) - np.min(ys)) / 2) + 8
+                            radius = max((np.max(xs) - np.min(xs)) / 2, (np.max(ys) - np.min(ys)) / 2) + 5
                             
-                            # Only draw if radius is reasonable
-                            if radius < 100 and radius > 5:
+                            if 8 <= radius <= 60:
                                 circle = Circle((cx, cy), radius, fill=False, edgecolor='#06b6d4', linewidth=2.5)
                                 ax2.add_patch(circle)
                                 
@@ -613,7 +598,7 @@ def show_app(model):
                     use_container_width=True
                 )
             else:
-                st.info("No nodules detected.")
+                st.info("No nodules detected with high confidence.")
 
 
 # ============================================================
