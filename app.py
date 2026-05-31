@@ -16,7 +16,6 @@ from datetime import datetime
 import zipfile
 import os
 import matplotlib.pyplot as plt
-from matplotlib.patches import Circle
 import shutil
 
 warnings.filterwarnings('ignore')
@@ -259,7 +258,7 @@ def analyze_3d_connected(mask_3d, spacing_zyx, volume_shape):
     nodules = []
     
     for region in regionprops(labeled_mask):
-        if region.area < 50:
+        if region.area < 30:
             continue
         
         volume_mm3 = region.area * voxel_volume_mm3
@@ -315,22 +314,27 @@ def load_volume(zip_file):
     
     return volume, spacing_zyx, tmp
 
-def create_overlay_image(slice_img, mask, alpha=0.4):
-    """Create a red overlay for the mask"""
-    # Normalize slice to 0-255
+def create_overlay_image(slice_img, mask, alpha=0.6):
+    """
+    Create a red overlay ONLY where the mask is present.
+    No black overlay - preserves the CT image everywhere else.
+    """
+    # Normalize slice to 0-255 range for display
     slice_norm = (slice_img - slice_img.min()) / (slice_img.max() - slice_img.min() + 1e-9)
     slice_uint8 = (slice_norm * 255).astype(np.uint8)
     
-    # Create RGB image
-    rgb = np.stack([slice_uint8, slice_uint8, slice_uint8], axis=-1)
+    # Create RGB image (grayscale CT)
+    rgb = np.stack([slice_uint8, slice_uint8, slice_uint8], axis=-1).astype(np.float32)
     
-    # Apply red overlay where mask is present
+    # Where mask is present, apply red overlay
     mask_bool = mask > 0
-    rgb[mask_bool, 0] = np.clip(rgb[mask_bool, 0] + int(255 * alpha), 0, 255)  # Red channel
-    rgb[mask_bool, 1] = np.clip(rgb[mask_bool, 1] * 0.3, 0, 255)  # Green channel reduced
-    rgb[mask_bool, 2] = np.clip(rgb[mask_bool, 2] * 0.3, 0, 255)  # Blue channel reduced
     
-    return rgb
+    # Apply red color to mask regions only
+    rgb[mask_bool, 0] = np.clip(rgb[mask_bool, 0] * 0.3 + 200, 0, 255)  # Red channel
+    rgb[mask_bool, 1] = np.clip(rgb[mask_bool, 1] * 0.2, 0, 255)  # Green channel
+    rgb[mask_bool, 2] = np.clip(rgb[mask_bool, 2] * 0.2, 0, 255)  # Blue channel
+    
+    return rgb.astype(np.uint8)
 
 
 # ============================================================
@@ -484,10 +488,10 @@ def show_app(model):
                 st.markdown('<div class="section-label">Slice Review</div>', unsafe_allow_html=True)
                 slice_idx = st.slider("Select slice to review", 0, num_slices - 1, num_slices // 2)
                 
-                # Get the mask for this slice (all nodules combined for overlay)
+                # Get the mask for this slice
                 slice_mask = mask_3d[slice_idx]
                 
-                # Create overlay image
+                # Create overlay (red only on mask, no black)
                 overlay_img = create_overlay_image(volume[slice_idx], slice_mask)
                 
                 # Display side by side
@@ -505,7 +509,7 @@ def show_app(model):
                 with col2:
                     fig2, ax2 = plt.subplots(figsize=(6, 6), facecolor='#0b1120')
                     ax2.imshow(overlay_img)
-                    ax2.set_title(f"Slice {slice_idx} - AI Detection Overlay", color='#f1f5f9', fontsize=12)
+                    ax2.set_title(f"Slice {slice_idx} - AI Detection (Red = Nodule)", color='#f1f5f9', fontsize=12)
                     ax2.axis('off')
                     st.pyplot(fig2)
                     plt.close(fig2)
