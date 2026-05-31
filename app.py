@@ -19,6 +19,8 @@ import gdown
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
 import shutil
+import pydicom
+import io
 
 warnings.filterwarnings('ignore')
 
@@ -32,22 +34,18 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# Advanced Styling
 st.markdown("""
 <style>
     .stApp {
         background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
     }
-    
     #MainMenu, header, footer { visibility: hidden; }
     .stDeployButton { display: none; }
-
     [data-testid="stSidebar"] {
         background: rgba(15, 23, 42, 0.95);
         backdrop-filter: blur(20px);
         border-right: 1px solid rgba(255,255,255,0.05);
     }
-
     .glass-panel {
         background: rgba(30, 41, 59, 0.6);
         backdrop-filter: blur(12px);
@@ -56,9 +54,7 @@ st.markdown("""
         padding: 1.5rem;
         box-shadow: 0 4px 30px rgba(0, 0, 0, 0.3);
     }
-
     h1, h2, h3 { color: #f8fafc; font-weight: 700; }
-    
     .section-label {
         font-size: 0.75rem;
         font-weight: 700;
@@ -78,7 +74,6 @@ st.markdown("""
         background: #38bdf8;
         border-radius: 2px;
     }
-
     .stButton > button {
         background: linear-gradient(90deg, #0ea5e9 0%, #6366f1 100%);
         color: white;
@@ -88,7 +83,6 @@ st.markdown("""
         transition: all 0.2s;
     }
     .stButton > button:hover { transform: scale(1.02); box-shadow: 0 0 25px rgba(14, 165, 233, 0.6); }
-    
     [data-testid="stFileUploader"] {
         background: rgba(15, 23, 42, 0.5);
         border: 2px dashed rgba(56, 189, 248, 0.3);
@@ -96,7 +90,6 @@ st.markdown("""
         padding: 2rem;
         text-align: center;
     }
-
     .nodule-row {
         display: flex;
         align-items: center;
@@ -105,7 +98,6 @@ st.markdown("""
         border-bottom: 1px solid rgba(255,255,255,0.05);
     }
     .nodule-row:last-child { border-bottom: none; }
-    
     .metric-box {
         background: rgba(0,0,0,0.2);
         padding: 0.5rem 1rem;
@@ -115,12 +107,10 @@ st.markdown("""
     }
     .metric-val { font-size: 1.1rem; font-weight: 700; color: #f1f5f9; }
     .metric-lbl { font-size: 0.7rem; color: #94a3b8; text-transform: uppercase; }
-    
     .badge { padding: 4px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 700; }
     .badge-urgent { background: rgba(239, 68, 68, 0.2); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.3); }
     .badge-follow { background: rgba(245, 158, 11, 0.2); color: #fcd34d; border: 1px solid rgba(245, 158, 11, 0.3); }
     .badge-routine { background: rgba(16, 185, 129, 0.2); color: #6ee7b7; border: 1px solid rgba(16, 185, 129, 0.3); }
-    
     .login-mode .main {
         display: flex;
         flex-direction: column;
@@ -131,6 +121,15 @@ st.markdown("""
     }
     .login-mode [data-testid="stSidebar"] { display: none; }
     .login-mode header { display: none; }
+    .spacing-info {
+        font-family: monospace;
+        font-size: 0.75rem;
+        color: #38bdf8;
+        background: rgba(0,0,0,0.3);
+        padding: 0.2rem 0.5rem;
+        border-radius: 4px;
+        display: inline-block;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -265,6 +264,9 @@ def analyze_3d_connected(mask_3d, spacing_zyx, volume_shape):
     z_spacing, y_spacing, x_spacing = spacing_zyx
     voxel_volume_mm3 = x_spacing * y_spacing * z_spacing
     
+    # Display spacing info for verification
+    st.caption(f"Spacing: X={x_spacing:.3f}mm, Y={y_spacing:.3f}mm, Z={z_spacing:.3f}mm | Voxel volume: {voxel_volume_mm3:.4f}mm³")
+    
     mask_3d_closed = binary_closing(mask_3d, structure=np.ones((3, 1, 1))).astype(np.uint8)
     labeled_mask = label(mask_3d_closed, connectivity=2)
     nodules = []
@@ -333,49 +335,85 @@ def load_volume(zip_file):
     
     img = sitk.ReadImage(mhd)
     volume = sitk.GetArrayFromImage(img)
-    spacing = img.GetSpacing()
-    return volume, (spacing[2], spacing[1], spacing[0]), tmp
+    spacing = img.GetSpacing()  # Returns (x, y, z) in mm
+    spacing_zyx = (spacing[2], spacing[1], spacing[0])  # Convert to (z, y, x)
+    
+    return volume, spacing_zyx, tmp
 
-def make_overlay(slice_img, mask_2d, alpha=0.45):
-    norm = (slice_img - slice_img.min()) / (slice_img.max() - slice_img.min() + 1e-9)
-    rgb = np.stack([norm, norm, norm], axis=-1)
-    mask_bool = mask_2d > 0.5
-    rgb[mask_bool, 0] = np.clip(rgb[mask_bool, 0] + alpha, 0, 1)
-    rgb[mask_bool, 1] = np.clip(rgb[mask_bool, 1] * 0.25, 0, 1)
-    rgb[mask_bool, 2] = np.clip(rgb[mask_bool, 2] * 0.25, 0, 1)
-    return (rgb * 255).astype(np.uint8)
+def load_dicom_slice(dicom_file):
+    """Load a single DICOM file and return the image array with spacing info"""
+    ds = pydicom.dcmread(dicom_file)
+    
+    # Get pixel array
+    image = ds.pixel_array.astype(np.float32)
+    
+    # Apply RescaleSlope/Intercept
+    if hasattr(ds, 'RescaleSlope'):
+        image = image * ds.RescaleSlope
+    if hasattr(ds, 'RescaleIntercept'):
+        image = image + ds.RescaleIntercept
+    
+    # Get pixel spacing if available
+    pixel_spacing = None
+    if hasattr(ds, 'PixelSpacing'):
+        pixel_spacing = ds.PixelSpacing  # (row spacing, column spacing) in mm
+    elif hasattr(ds, 'ImagerPixelSpacing'):
+        pixel_spacing = ds.ImagerPixelSpacing
+    
+    return image, pixel_spacing, ds
 
-def draw_with_matplotlib(img, mask, nodules, title):
+def draw_with_matplotlib(img, mask, nodules_in_slice, title):
+    """Draw CT slice with nodule outlines only - NOT full mask overlay."""
     fig, ax = plt.subplots(figsize=(6, 6), facecolor='#0b1120')
     
-    # Show overlay
-    overlay = make_overlay(img, mask)
-    ax.imshow(overlay)
+    # Show grayscale CT image
+    ax.imshow(img, cmap='gray')
     
-    # Draw circles around nodules
-    for nodule in nodules:
-        if 'centroid' in nodule:
-            centroid = nodule['centroid']
-            if len(centroid) == 2:
-                cy, cx = centroid[0], centroid[1]
+    # Draw circles ONLY around nodules
+    for nodule in nodules_in_slice:
+        # Get centroid for this nodule
+        if 'centroid' in nodule and len(nodule['centroid']) >= 2:
+            if len(nodule['centroid']) == 3:
+                cy, cx = nodule['centroid'][1], nodule['centroid'][2]
             else:
-                cy, cx = centroid[1], centroid[2]
-            
+                cy, cx = nodule['centroid'][0], nodule['centroid'][1]
+        else:
+            continue
+        
+        # Find actual mask for this nodule
+        if 'label_id' in nodule and mask is not None:
+            nodule_region = (mask == nodule['label_id'])
+            if np.any(nodule_region):
+                ys, xs = np.where(nodule_region)
+                if len(xs) > 0:
+                    cx = np.mean(xs)
+                    cy = np.mean(ys)
+                    radius = max((np.max(xs) - np.min(xs)) / 2, (np.max(ys) - np.min(ys)) / 2) + 8
+                else:
+                    radius = 15
+            else:
+                radius = 15
+        else:
             radius = 15
-            circle = Circle((cx, cy), radius, fill=False, edgecolor='#06b6d4', linewidth=2.5)
-            ax.add_patch(circle)
-            
-            if 'diameter_mm' in nodule:
-                label_text = f"N{nodule['id']}\n{nodule['diameter_mm']:.1f}mm"
-            else:
-                label_text = f"N{nodule['id']}\n{nodule['diameter_px']:.0f}px"
-            
-            ax.annotate(
-                label_text,
-                xy=(cx, cy), xytext=(cx + radius + 8, cy - radius),
-                fontsize=9, fontweight='600', color='#f1f5f9',
-                bbox=dict(boxstyle='round,pad=0.3', facecolor='#0f172a', edgecolor='#273755', alpha=0.9),
-            )
+        
+        # Draw circle
+        circle = Circle((cx, cy), radius, fill=False, edgecolor='#06b6d4', linewidth=2.5)
+        ax.add_patch(circle)
+        
+        # Add label
+        if 'diameter_mm' in nodule:
+            label_text = f"N{nodule['id']}\n{nodule['diameter_mm']:.1f}mm"
+        elif 'diameter_px' in nodule:
+            label_text = f"N{nodule['id']}\n{nodule['diameter_px']:.0f}px"
+        else:
+            label_text = f"N{nodule['id']}"
+        
+        ax.annotate(
+            label_text,
+            xy=(cx, cy), xytext=(cx + radius + 8, cy - radius),
+            fontsize=9, fontweight='600', color='#f1f5f9',
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='#0f172a', edgecolor='#06b6d4', alpha=0.9),
+        )
     
     ax.set_title(title, color='#f1f5f9', fontsize=12)
     ax.axis('off')
@@ -396,6 +434,7 @@ def show_login():
             <div style="font-size: 3rem; margin-bottom: 0.5rem;"></div>
             <h1 style="margin-bottom: 0.5rem; font-size: 1.8rem;">LungVision AI</h1>
             <p style="color: #94a3b8; margin-bottom: 2rem;">Secure Clinical Access Portal</p>
+        </div>
         """, unsafe_allow_html=True)
 
         with st.form("login_form", clear_on_submit=False):
@@ -440,61 +479,152 @@ def show_app(model):
 
     # Mode Selection
     st.markdown('<div class="section-label">Acquisition Mode</div>', unsafe_allow_html=True)
-    mode = st.radio("", ["Single Slice Analysis", "Full Volume Scan (3D)"], horizontal=True, label_visibility="collapsed")
+    mode = st.radio("", ["Single Slice (PNG/JPG/DICOM)", "Full Volume (MHD+RAW ZIP)"], horizontal=True, label_visibility="collapsed")
 
     # ================= SINGLE SLICE =================
     if "Single" in mode:
         st.markdown('<div class="section-label">Data Input</div>', unsafe_allow_html=True)
-        upfile = st.file_uploader("Upload CT Slice (PNG/JPG)", type=["png", "jpg", "jpeg"], label_visibility="collapsed")
-
-        if upfile:
-            img = np.array(Image.open(upfile).convert('L'), dtype=np.float32)
+        
+        upload_type = st.radio("File Type", ["PNG/JPG Image", "DICOM File (.dcm)"], horizontal=True, label_visibility="collapsed")
+        
+        if upload_type == "PNG/JPG Image":
+            upfile = st.file_uploader("Upload CT Slice", type=["png", "jpg", "jpeg"], label_visibility="collapsed")
             
-            with st.spinner("Processing neural network inference..."):
-                mask = segment_slice(model, img)
-                nodules = analyze_2d(mask)
-                labeled_mask = label(mask)
-
-            col1, col2 = st.columns(2)
+            if upfile:
+                img = np.array(Image.open(upfile).convert('L'), dtype=np.float32)
+                pixel_spacing = None
+                
+                with st.spinner("Processing..."):
+                    mask = segment_slice(model, img)
+                    nodules = analyze_2d(mask)
+                    labeled_mask = label(mask)
+                
+                st.info("Note: PNG/JPG files lack physical spacing information. Measurements are in pixels.")
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    fig, ax = plt.subplots(figsize=(6, 6), facecolor='#0b1120')
+                    ax.imshow(img, cmap='gray')
+                    ax.set_title("Source Image", color='#f1f5f9', fontsize=12)
+                    ax.axis('off')
+                    st.pyplot(fig)
+                    plt.close(fig)
+                
+                with col2:
+                    fig2 = draw_with_matplotlib(img, labeled_mask, nodules, f"Analysis: {len(nodules)} Detected")
+                    st.pyplot(fig2)
+                    plt.close(fig2)
+                
+                if nodules:
+                    st.markdown('<div class="glass-panel">', unsafe_allow_html=True)
+                    st.markdown(f"### Detected Findings ({len(nodules)})")
+                    for n in nodules:
+                        st.markdown(f"""
+                        <div class="nodule-row">
+                            <div style="font-weight:700; color:#38bdf8; font-size:1.1rem;">N{n['id']}</div>
+                            <div class="metric-box">
+                                <div class="metric-val">{n['diameter_px']:.0f}</div>
+                                <div class="metric-lbl">Diameter (px)</div>
+                            </div>
+                            <div class="metric-box">
+                                <div class="metric-val">{n['area_px']:.0f}</div>
+                                <div class="metric-lbl">Area (px²)</div>
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    st.markdown('</div>', unsafe_allow_html=True)
+                else:
+                    st.info("No significant findings detected.")
+        
+        else:  # DICOM File
+            upfile = st.file_uploader("Upload DICOM File (.dcm)", type=["dcm"], label_visibility="collapsed")
             
-            with col1:
-                fig_orig, ax_orig = plt.subplots(figsize=(6, 6), facecolor='#0b1120')
-                ax_orig.imshow(img, cmap='gray')
-                ax_orig.set_title("Source Image", color='#f1f5f9', fontsize=12)
-                ax_orig.axis('off')
-                st.pyplot(fig_orig)
-                plt.close(fig_orig)
-
-            with col2:
-                fig_anal = draw_with_matplotlib(img, labeled_mask > 0, nodules, f"Analysis: {len(nodules)} Detected")
-                st.pyplot(fig_anal)
-                plt.close(fig_anal)
-
-            if nodules:
-                st.markdown('<div class="glass-panel">', unsafe_allow_html=True)
-                st.markdown(f"### Detected Findings ({len(nodules)})")
-                for n in nodules:
-                    st.markdown(f"""
-                    <div class="nodule-row">
-                        <div style="font-weight:700; color:#38bdf8; font-size:1.1rem;">N{n['id']}</div>
-                        <div class="metric-box">
-                            <div class="metric-val">{n['diameter_px']:.0f}</div>
-                            <div class="metric-lbl">Diameter (px)</div>
-                        </div>
-                        <div class="metric-box">
-                            <div class="metric-val">{n['area_px']:.0f}</div>
-                            <div class="metric-lbl">Area (px²)</div>
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                st.markdown('</div>', unsafe_allow_html=True)
-            else:
-                st.info("No significant findings detected.")
+            if upfile:
+                # Save uploaded DICOM to temp file
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.dcm') as tmp_file:
+                    tmp_file.write(upfile.getbuffer())
+                    tmp_path = tmp_file.name
+                
+                try:
+                    # Load DICOM
+                    image, pixel_spacing, ds = load_dicom_slice(tmp_path)
+                    
+                    # Display DICOM metadata
+                    with st.expander("DICOM Metadata", expanded=False):
+                        st.caption(f"Patient ID: {getattr(ds, 'PatientID', 'N/A')}")
+                        st.caption(f"Study Date: {getattr(ds, 'StudyDate', 'N/A')}")
+                        st.caption(f"Modality: {getattr(ds, 'Modality', 'N/A')}")
+                        st.caption(f"Slice Thickness: {getattr(ds, 'SliceThickness', 'N/A')} mm")
+                        if pixel_spacing:
+                            st.caption(f"Pixel Spacing: {pixel_spacing[0]} x {pixel_spacing[1]} mm")
+                    
+                    with st.spinner("Processing DICOM..."):
+                        mask = segment_slice(model, image)
+                        nodules = analyze_2d(mask)
+                        labeled_mask = label(mask)
+                    
+                    if pixel_spacing:
+                        st.success(f"Physical spacing detected: {pixel_spacing[0]:.3f} mm/pixel")
+                        # Convert pixel measurements to mm if spacing available
+                        for n in nodules:
+                            n['diameter_mm'] = n['diameter_px'] * pixel_spacing[0]
+                            n['area_mm2'] = n['area_px'] * pixel_spacing[0] * pixel_spacing[1]
+                    
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        fig, ax = plt.subplots(figsize=(6, 6), facecolor='#0b1120')
+                        ax.imshow(image, cmap='gray')
+                        ax.set_title("DICOM CT Slice", color='#f1f5f9', fontsize=12)
+                        ax.axis('off')
+                        st.pyplot(fig)
+                        plt.close(fig)
+                    
+                    with col2:
+                        fig2 = draw_with_matplotlib(image, labeled_mask, nodules, f"Analysis: {len(nodules)} Detected")
+                        st.pyplot(fig2)
+                        plt.close(fig2)
+                    
+                    if nodules:
+                        st.markdown('<div class="glass-panel">', unsafe_allow_html=True)
+                        st.markdown(f"### Detected Findings ({len(nodules)})")
+                        for n in nodules:
+                            if 'diameter_mm' in n:
+                                diam_display = f"{n['diameter_mm']:.1f} mm"
+                                area_display = f"{n['area_mm2']:.1f} mm²"
+                            else:
+                                diam_display = f"{n['diameter_px']:.0f} px"
+                                area_display = f"{n['area_px']:.0f} px²"
+                            
+                            st.markdown(f"""
+                            <div class="nodule-row">
+                                <div style="font-weight:700; color:#38bdf8; font-size:1.1rem;">N{n['id']}</div>
+                                <div class="metric-box">
+                                    <div class="metric-val">{diam_display}</div>
+                                    <div class="metric-lbl">Diameter</div>
+                                </div>
+                                <div class="metric-box">
+                                    <div class="metric-val">{area_display}</div>
+                                    <div class="metric-lbl">Area</div>
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                        st.markdown('</div>', unsafe_allow_html=True)
+                    else:
+                        st.info("No significant findings detected.")
+                        
+                except Exception as e:
+                    st.error(f"Error reading DICOM file: {str(e)}")
+                finally:
+                    os.unlink(tmp_path)  # Clean up temp file
 
     # ================= VOLUME MODE =================
     else:
         st.markdown('<div class="section-label">Data Input</div>', unsafe_allow_html=True)
-        upzip = st.file_uploader("Upload Volume (ZIP containing .mhd/.raw)", type=["zip"], label_visibility="collapsed")
+        st.info("Upload a ZIP file containing .mhd and .raw files from a DICOM series conversion")
+        
+        upzip = st.file_uploader("Upload Volume", type=["zip"], label_visibility="collapsed")
 
         if upzip:
             with st.spinner("Loading DICOM Series..."):
@@ -504,7 +634,7 @@ def show_app(model):
                 st.error("Error reading ZIP archive. Please check file structure.")
             else:
                 num_slices = volume.shape[0]
-                st.success(f"Volume Loaded: {num_slices} slices | Spacing Z={spacing_zyx[0]:.2f}mm")
+                st.success(f"Volume Loaded: {num_slices} slices")
                 
                 prog = st.progress(0)
                 status = st.empty()
@@ -569,22 +699,53 @@ def show_app(model):
                             continue
                         n_data = next((n for n in nodules if n['label_id'] == ul), None)
                         if n_data:
-                            nodules_in_slice.append(n_data)
+                            nodule_mask_in_slice = (slice_labeled == ul)
+                            n_data_copy = n_data.copy()
+                            n_data_copy['mask_in_slice'] = nodule_mask_in_slice
+                            nodules_in_slice.append(n_data_copy)
 
                     col1, col2 = st.columns(2)
                     
                     with col1:
-                        fig_raw, ax_raw = plt.subplots(figsize=(6, 6), facecolor='#0b1120')
-                        ax_raw.imshow(volume[slice_idx], cmap='gray')
-                        ax_raw.set_title(f"Raw Slice {slice_idx}", color='#f1f5f9', fontsize=12)
-                        ax_raw.axis('off')
-                        st.pyplot(fig_raw)
-                        plt.close(fig_raw)
+                        fig, ax = plt.subplots(figsize=(6, 6), facecolor='#0b1120')
+                        ax.imshow(volume[slice_idx], cmap='gray')
+                        ax.set_title(f"Raw Slice {slice_idx}", color='#f1f5f9', fontsize=12)
+                        ax.axis('off')
+                        st.pyplot(fig)
+                        plt.close(fig)
 
                     with col2:
-                        fig_anal = draw_with_matplotlib(volume[slice_idx], slice_labeled > 0, nodules_in_slice, f"Segmented: {len(nodules_in_slice)} Nodules")
-                        st.pyplot(fig_anal)
-                        plt.close(fig_anal)
+                        fig2, ax2 = plt.subplots(figsize=(6, 6), facecolor='#0b1120')
+                        ax2.imshow(volume[slice_idx], cmap='gray')
+                        
+                        for n in nodules_in_slice:
+                            if 'mask_in_slice' in n:
+                                nodule_mask = n['mask_in_slice']
+                                ys, xs = np.where(nodule_mask)
+                                if len(xs) > 0:
+                                    cx = np.mean(xs)
+                                    cy = np.mean(ys)
+                                    radius = max((np.max(xs) - np.min(xs)) / 2, (np.max(ys) - np.min(ys)) / 2) + 8
+                                else:
+                                    continue
+                            else:
+                                continue
+                            
+                            circle = Circle((cx, cy), radius, fill=False, edgecolor='#06b6d4', linewidth=2.5)
+                            ax2.add_patch(circle)
+                            
+                            label_text = f"N{n['id']}\n{n['diameter_mm']:.1f}mm"
+                            ax2.annotate(
+                                label_text,
+                                xy=(cx, cy), xytext=(cx + radius + 8, cy - radius),
+                                fontsize=9, fontweight='600', color='#f1f5f9',
+                                bbox=dict(boxstyle='round,pad=0.3', facecolor='#0f172a', edgecolor='#06b6d4', alpha=0.9),
+                            )
+                        
+                        ax2.set_title(f"Segmented: {len(nodules_in_slice)} Nodules", color='#f1f5f9', fontsize=12)
+                        ax2.axis('off')
+                        st.pyplot(fig2)
+                        plt.close(fig2)
                     
                     # Export CSV
                     df = pd.DataFrame([{
