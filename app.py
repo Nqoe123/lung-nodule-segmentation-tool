@@ -17,6 +17,7 @@ import zipfile
 import os
 import gdown
 import shutil
+import hashlib
 
 warnings.filterwarnings('ignore')
 
@@ -185,7 +186,7 @@ class MemoryEfficientUNet(nn.Module):
 
 
 # ============================================================
-# MODEL LOADING
+# MODEL LOADING WITH FIXED ERROR HANDLING
 # ============================================================
 GDRIVE_ID = "1ZMXIzhxrvtEwXmbs1G2HrVRMl8-RkKc8"
 MODEL_FN = "best_model.pth"
@@ -193,20 +194,45 @@ MODEL_FN = "best_model.pth"
 @st.cache_resource
 def load_model():
     try:
-        if not os.path.exists(MODEL_FN):
-            with st.spinner("Initializing AI Core..."):
+        model_path = MODEL_FN
+        
+        # Check if model file exists and is valid
+        if not os.path.exists(model_path):
+            with st.spinner("Downloading model (12.85 MB)..."):
                 url = f"https://drive.google.com/uc?id={GDRIVE_ID}"
-                gdown.download(url, MODEL_FN, quiet=False)
+                gdown.download(url, model_path, quiet=False)
+            
+            # Verify file was downloaded
+            if not os.path.exists(model_path):
+                st.error("Model download failed. Please check internet connection.")
+                return None
+            
+            # Check file size (should be ~12.85 MB)
+            file_size = os.path.getsize(model_path) / (1024 * 1024)
+            if file_size < 10:
+                st.error(f"Model file corrupted (size: {file_size:.2f} MB, expected ~12.85 MB)")
+                os.remove(model_path)
+                return None
         
+        # Create model instance
         model = MemoryEfficientUNet(n_channels=1, n_classes=1)
-        state_dict = torch.load(MODEL_FN, map_location='cpu')
         
+        # Load state dict
+        try:
+            state_dict = torch.load(model_path, map_location='cpu')
+        except Exception as e:
+            st.error(f"Cannot read model file: {str(e)}")
+            os.remove(model_path)
+            return None
+        
+        # Handle different state dict formats
         if isinstance(state_dict, dict):
             if 'model_state_dict' in state_dict:
                 state_dict = state_dict['model_state_dict']
             elif 'state_dict' in state_dict:
                 state_dict = state_dict['state_dict']
         
+        # Remove 'module.' prefix if present
         if state_dict and 'module.' in list(state_dict.keys())[0]:
             new_state_dict = OrderedDict()
             for k, v in state_dict.items():
@@ -214,11 +240,15 @@ def load_model():
                 new_state_dict[name] = v
             state_dict = new_state_dict
         
+        # Load weights
         model.load_state_dict(state_dict)
         model.eval()
+        
+        st.success("Model loaded successfully!")
         return model
+        
     except Exception as e:
-        st.error(f"System Alert: {str(e)}")
+        st.error(f"Model loading failed: {str(e)}")
         return None
 
 
@@ -300,6 +330,7 @@ def load_volume(zip_file):
             break
     
     if not mhd:
+        shutil.rmtree(tmp, ignore_errors=True)
         return None, None, None
     
     img = sitk.ReadImage(mhd)
@@ -310,12 +341,9 @@ def load_volume(zip_file):
     return volume, spacing_zyx, tmp
 
 def create_overlay_image_pil(slice_img, nodules_in_slice):
-    """Create overlay image using PIL (no matplotlib)"""
-    # Normalize to 0-255
     img_norm = (slice_img - slice_img.min()) / (slice_img.max() - slice_img.min() + 1e-9)
     img_uint8 = (img_norm * 255).astype(np.uint8)
     
-    # Convert to RGB PIL image
     img_pil = Image.fromarray(img_uint8).convert('RGB')
     draw = ImageDraw.Draw(img_pil)
     
@@ -332,10 +360,7 @@ def create_overlay_image_pil(slice_img, nodules_in_slice):
         cy = int(np.mean(ys))
         radius = int(max((np.max(xs) - np.min(xs)) / 2, (np.max(ys) - np.min(ys)) / 2)) + 8
         
-        # Draw circle
         draw.ellipse([cx - radius, cy - radius, cx + radius, cy + radius], outline=(6, 182, 212), width=2)
-        
-        # Draw text
         label_text = f"N{nodule['id']}\n{nodule['diameter_mm']:.1f}mm"
         draw.text((cx + radius + 5, cy - radius), label_text, fill=(241, 245, 249))
     
@@ -348,7 +373,6 @@ def create_overlay_image_pil(slice_img, nodules_in_slice):
 def show_login():
     st.markdown('<div class="login-mode">', unsafe_allow_html=True)
     
-    # Remove vertical_alignment parameter - use empty space for centering
     st.markdown('<div style="height: 15vh;"></div>', unsafe_allow_html=True)
     
     col1, col2, col3 = st.columns([1, 2, 1])
@@ -386,7 +410,7 @@ def show_app(model):
     <div class="glass-panel" style="margin-bottom: 1.5rem; display: flex; justify-content: space-between; align-items: center;">
         <div>
             <h1 style="margin:0; font-size: 1.5rem;">LungVision <span style="color:#38bdf8">AI</span></h1>
-            <div style="color:#94a3b8; font-size: 0.85rem;">User: {st.session_state.get('username', 'Guest')} | System Online</div>
+            <div style="color:#94a3b8; font-size: 0.85rem;">User: {st.session_state.get('username', 'Guest')}</div>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -408,7 +432,7 @@ def show_app(model):
     )
 
     if upzip:
-        with st.spinner("Loading CT volume from DICOM..."):
+        with st.spinner("Loading CT volume..."):
             volume, spacing_zyx, temp_dir = load_volume(upzip)
         
         if volume is None:
@@ -417,7 +441,7 @@ def show_app(model):
             num_slices = volume.shape[0]
             st.success(f"CT Loaded: {num_slices} slices")
             
-            with st.expander("Scan Parameters (from DICOM metadata)", expanded=True):
+            with st.expander("Scan Parameters", expanded=True):
                 col1, col2, col3 = st.columns(3)
                 col1.metric("Pixel Spacing (X)", f"{spacing_zyx[2]:.3f} mm")
                 col2.metric("Pixel Spacing (Y)", f"{spacing_zyx[1]:.3f} mm")
@@ -474,7 +498,7 @@ def show_app(model):
                         </div>
                         <div class="metric-box">
                             <div class="metric-val">{n['volume_mm3']:.0f}</div>
-                            <div class="metric-lbl">Volume (mm³)</div>
+                            <div class="metric-lbl">Volume</div>
                         </div>
                         <div class="metric-box">
                             <div class="metric-val">Slices {n['slice_start']}-{n['slice_end']}</div>
@@ -511,10 +535,12 @@ def show_app(model):
                     st.image(img_display, caption=f"Slice {slice_idx} - Original", use_container_width=True, clamp=True)
 
                 with col2:
-                    overlay_img = create_overlay_image_pil(volume[slice_idx], nodules_in_slice)
-                    st.image(overlay_img, caption=f"Slice {slice_idx} - {len(nodules_in_slice)} Nodule(s) Detected", use_container_width=True)
+                    if nodules_in_slice:
+                        overlay_img = create_overlay_image_pil(volume[slice_idx], nodules_in_slice)
+                        st.image(overlay_img, caption=f"Slice {slice_idx} - {len(nodules_in_slice)} Nodule(s)", use_container_width=True)
+                    else:
+                        st.image(img_display, caption=f"Slice {slice_idx} - No nodules", use_container_width=True, clamp=True)
                 
-                # Export clinical report
                 df = pd.DataFrame([{
                     "Nodule ID": n['id'],
                     "Diameter (mm)": round(n['diameter_mm'], 2),
@@ -547,10 +573,13 @@ def main():
         show_login()
     else:
         model = load_model()
-        if model:
+        if model is not None:
             show_app(model)
         else:
-            st.stop()
+            st.error("Failed to load AI model. Please refresh the page or contact support.")
+            if st.button("Retry"):
+                st.cache_resource.clear()
+                st.rerun()
 
 if __name__ == "__main__":
     main()
