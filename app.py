@@ -26,56 +26,55 @@ warnings.filterwarnings('ignore')
 # ============================================================
 st.set_page_config(
     page_title="LungVision AI | Nodule Segmentation",
-    page_icon="🫁",
+    page_icon="",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"
 )
 
 # ============================================================
-# CLEAN CSS (Removed clutter)
+# CLEAN CSS
 # ============================================================
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 
-:root {
-    --primary: #0ea5e9;
-    --primary-dark: #0369a1;
-    --bg-deep: #060b14;
-    --bg-main: #0b1120;
-    --bg-card: #111827;
-    --border: #1e2d4a;
-    --text-1: #f1f5f9;
-    --text-2: #94a3b8;
-    --text-3: #64748b;
-    --green: #10b981;
-    --amber: #f59e0b;
-    --red: #ef4444;
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+html, body, .main, .main .block-container {
+    margin: 0;
+    padding: 0;
 }
 
 .main .block-container {
-    background: var(--bg-main);
+    background: #0b1120;
     max-width: 1400px;
-    padding-top: 1rem !important;
-    padding-bottom: 2rem !important;
+    padding: 0rem 1rem 2rem 1rem !important;
+    margin-top: 0 !important;
 }
 
 section[data-testid="stSidebar"] {
-    background: linear-gradient(180deg, #0d1526 0%, var(--bg-deep) 100%) !important;
-    border-right: 1px solid var(--border) !important;
+    background: linear-gradient(180deg, #0d1526 0%, #060b14 100%) !important;
+    border-right: 1px solid #1e2d4a !important;
 }
 
-/* Login wrapper - centered */
+/* Login wrapper - centered with no top space */
 .login-wrapper {
     display: flex;
     justify-content: center;
     align-items: center;
-    min-height: 80vh;
+    min-height: 100vh;
+    margin: 0;
+    padding: 0;
+    background: #0b1120;
 }
 
 .login-card {
     background: linear-gradient(160deg, #111d32 0%, #0b1221 100%);
-    border: 1px solid var(--border);
+    border: 1px solid #1e2d4a;
     border-radius: 24px;
     padding: 2.5rem 2rem;
     width: 100%;
@@ -92,10 +91,11 @@ section[data-testid="stSidebar"] {
     font-size: 1.5rem !important;
     font-weight: 700;
     margin-bottom: 0.25rem;
+    color: #f1f5f9;
 }
 
 .login-sub {
-    color: var(--text-3) !important;
+    color: #64748b !important;
     font-size: 0.8rem;
     margin-bottom: 1.5rem;
 }
@@ -103,20 +103,22 @@ section[data-testid="stSidebar"] {
 /* Header */
 .header-card {
     background: linear-gradient(135deg, #0c2340 0%, #132e52 100%);
-    border: 1px solid var(--border);
+    border: 1px solid #1e2d4a;
     border-radius: 16px;
     padding: 1.25rem 2rem;
     margin-bottom: 1.5rem;
+    margin-top: 0.5rem;
 }
 
 .header-card h1 {
     font-size: 1.6rem !important;
     font-weight: 700 !important;
     margin: 0;
+    color: #f1f5f9;
 }
 
 .header-card .tagline {
-    color: var(--text-2) !important;
+    color: #94a3b8 !important;
     font-size: 0.85rem;
     margin-top: 0.2rem;
 }
@@ -127,13 +129,13 @@ section[data-testid="stSidebar"] {
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.08em;
-    color: var(--text-3) !important;
+    color: #64748b !important;
     margin-bottom: 0.5rem;
 }
 
 /* Buttons */
 .stButton > button {
-    background: linear-gradient(135deg, var(--primary), var(--primary-dark)) !important;
+    background: linear-gradient(135deg, #0ea5e9, #0369a1) !important;
     color: white !important;
     font-weight: 600 !important;
     border: none !important;
@@ -141,44 +143,45 @@ section[data-testid="stSidebar"] {
     padding: 0.5rem 1.2rem !important;
 }
 
-/* File uploader - fixed duplicate text */
+/* File uploader */
 [data-testid="stFileUploader"] {
     border: none !important;
 }
 [data-testid="stFileUploader"] > section > div {
-    background: var(--bg-card) !important;
-    border: 2px dashed var(--border) !important;
+    background: #111827 !important;
+    border: 2px dashed #1e2d4a !important;
     border-radius: 14px !important;
     padding: 1.5rem !important;
 }
 [data-testid="stFileUploader"] label {
-    color: var(--text-2) !important;
+    color: #94a3b8 !important;
     font-size: 0.85rem !important;
 }
 
 /* Metric cards */
 div[data-testid="stMetric"] {
-    background: var(--bg-card) !important;
+    background: #111827 !important;
     padding: 0.8rem 1rem !important;
     border-radius: 12px !important;
-    border: 1px solid var(--border) !important;
+    border: 1px solid #1e2d4a !important;
 }
 div[data-testid="stMetricValue"] {
     font-size: 1.3rem !important;
+    color: #f1f5f9 !important;
 }
 
 /* Radio group */
 .stRadio [data-baseweb="radio-group"] {
-    background: var(--bg-card) !important;
-    border: 1px solid var(--border) !important;
+    background: #111827 !important;
+    border: 1px solid #1e2d4a !important;
     border-radius: 10px !important;
     padding: 0.3rem !important;
 }
 
 /* Nodule result card */
 .nodule-result-card {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
+    background: #111827;
+    border: 1px solid #1e2d4a;
     border-radius: 12px;
     padding: 1rem 1.2rem;
     margin-bottom: 0.5rem;
@@ -187,13 +190,13 @@ div[data-testid="stMetricValue"] {
     gap: 1rem;
     flex-wrap: wrap;
 }
-.nodule-result-card.routine { border-left: 3px solid var(--green); }
-.nodule-result-card.followup { border-left: 3px solid var(--amber); }
-.nodule-result-card.urgent { border-left: 3px solid var(--red); }
+.nodule-result-card.routine { border-left: 3px solid #10b981; }
+.nodule-result-card.followup { border-left: 3px solid #f59e0b; }
+.nodule-result-card.urgent { border-left: 3px solid #ef4444; }
 
 .nodule-id-badge {
     background: rgba(14,165,233,0.12);
-    color: var(--primary);
+    color: #0ea5e9;
     font-weight: 700;
     font-size: 0.75rem;
     padding: 0.25rem 0.6rem;
@@ -214,11 +217,12 @@ div[data-testid="stMetricValue"] {
 .nodule-measure .val {
     font-size: 1rem;
     font-weight: 700;
+    color: #f1f5f9;
 }
 .nodule-measure .lbl {
     font-size: 0.6rem;
     text-transform: uppercase;
-    color: var(--text-3);
+    color: #64748b;
 }
 
 .nodule-rec {
@@ -227,20 +231,35 @@ div[data-testid="stMetricValue"] {
     padding: 0.2rem 0.6rem;
     border-radius: 6px;
 }
-.nodule-rec.routine { background: rgba(16,185,129,0.12); color: var(--green); }
-.nodule-rec.followup { background: rgba(245,158,11,0.12); color: var(--amber); }
-.nodule-rec.urgent { background: rgba(239,68,68,0.12); color: var(--red); }
+.nodule-rec.routine { background: rgba(16,185,129,0.12); color: #10b981; }
+.nodule-rec.followup { background: rgba(245,158,11,0.12); color: #f59e0b; }
+.nodule-rec.urgent { background: rgba(239,68,68,0.12); color: #ef4444; }
 
 .app-footer {
     text-align: center;
-    color: var(--text-3) !important;
+    color: #64748b !important;
     font-size: 0.7rem;
     margin-top: 2rem;
     padding-top: 1rem;
-    border-top: 1px solid var(--border);
+    border-top: 1px solid #1e2d4a;
 }
 
-#MainMenu, footer, header { visibility: hidden; }
+/* Hide default Streamlit elements */
+#MainMenu, footer, header {
+    visibility: hidden;
+}
+
+/* Sidebar expand button - make visible */
+button[kind="header"] {
+    display: flex !important;
+    background: #0ea5e9 !important;
+    color: white !important;
+}
+
+/* Fix sidebar collapse/expand */
+.css-1d391kg, .css-1lcbmhc {
+    z-index: 100;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -329,10 +348,10 @@ class MemoryEfficientUNet(nn.Module):
 
 
 # ============================================================
-# MODEL LOADING
+# MODEL LOADING - USING best_model.pth
 # ============================================================
-GDRIVE_ID = "1lJOEoxPW3eUY3fdl5nuaI5V92T8Uwsyq"
-MODEL_FN = "final_complete_model.pth"
+GDRIVE_ID = "1ZMXIzhxrvtEwXmbs1G2HrVRMl8-RkKc8"
+MODEL_FN = "best_model.pth"
 
 @st.cache_resource
 def load_model():
@@ -343,15 +362,17 @@ def load_model():
                 gdown.download(url, MODEL_FN, quiet=False)
         
         model = MemoryEfficientUNet(n_channels=1, n_classes=1)
-        checkpoint = torch.load(MODEL_FN, map_location='cpu')
         
-        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-            state_dict = checkpoint['model_state_dict']
-        elif isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
-            state_dict = checkpoint['state_dict']
-        else:
-            state_dict = checkpoint
+        # Load state dict directly (best_model.pth contains just weights)
+        state_dict = torch.load(MODEL_FN, map_location='cpu')
         
+        # Handle different state dict formats
+        if isinstance(state_dict, dict) and 'model_state_dict' in state_dict:
+            state_dict = state_dict['model_state_dict']
+        elif isinstance(state_dict, dict) and 'state_dict' in state_dict:
+            state_dict = state_dict['state_dict']
+        
+        # Remove 'module.' prefix if present
         if state_dict and 'module.' in list(state_dict.keys())[0]:
             new_state_dict = OrderedDict()
             for k, v in state_dict.items():
@@ -522,30 +543,32 @@ def draw_slice_view(ax, slice_img, labeled_2d, nodules_info, title=""):
 
 
 # ============================================================
-# LOGIN PAGE
+# LOGIN PAGE - FIXED VERTICAL ALIGNMENT
 # ============================================================
 def show_login():
-    st.markdown('<div class="login-wrapper">', unsafe_allow_html=True)
     st.markdown("""
-    <div class="login-card">
-        <div class="login-icon">🫁</div>
-        <h2>LungVision AI</h2>
-        <p class="login-sub">Clinical Nodule Segmentation</p>
+    <div class="login-wrapper">
+        <div class="login-card">
+            <div class="login-icon"></div>
+            <h2>LungVision AI</h2>
+            <p class="login-sub">Clinical Nodule Segmentation</p>
+        </div>
     </div>
     """, unsafe_allow_html=True)
 
-    with st.form("login_form", clear_on_submit=False):
-        user = st.text_input("Radiologist ID", placeholder="Enter your ID")
-        pwd = st.text_input("Password", type="password", placeholder="Enter password")
-        submitted = st.form_submit_button("Sign In", use_container_width=True)
-        if submitted:
-            if user == "radiologist" and pwd == "hit500":
-                st.session_state.authenticated = True
-                st.rerun()
-            else:
-                st.error("Invalid credentials")
-
-    st.markdown('</div>', unsafe_allow_html=True)
+    # Center the form using columns
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        with st.form("login_form", clear_on_submit=False):
+            user = st.text_input("Radiologist ID", placeholder="Enter your ID")
+            pwd = st.text_input("Password", type="password", placeholder="Enter password")
+            submitted = st.form_submit_button("Sign In", use_container_width=True)
+            if submitted:
+                if user == "radiologist" and pwd == "hit500":
+                    st.session_state.authenticated = True
+                    st.rerun()
+                else:
+                    st.error("Invalid credentials")
 
 
 # ============================================================
@@ -555,27 +578,27 @@ def show_app(model):
     # Header
     st.markdown("""
     <div class="header-card">
-        <h1>🫁 LungVision AI</h1>
-        <p class="tagline">Automatic Lung Nodule Detection & Segmentation</p>
+        <h1>LungVision AI</h1>
+        <p class="tagline">Automatic Lung Nodule Detection and Segmentation</p>
     </div>
     """, unsafe_allow_html=True)
 
     # Sidebar
     with st.sidebar:
-        st.markdown("### 👨‍⚕️ Radiologist")
+        st.markdown("### Radiologist Panel")
         if st.button("Logout", use_container_width=True):
             st.session_state.clear()
             st.rerun()
         st.markdown("---")
-        st.markdown("### ℹ️ Info")
+        st.markdown("### Information")
         st.caption("Upload a CT scan to detect and segment lung nodules.")
         st.markdown("---")
-        st.markdown("### 📋 Instructions")
+        st.markdown("### Instructions")
         st.caption("1. Select scan type below")
         st.caption("2. Upload PNG or ZIP file")
         st.caption("3. View detected nodules")
         st.markdown("---")
-        st.markdown("### ⚠️ Disclaimer")
+        st.markdown("### Disclaimer")
         st.caption("Clinical decision support only. Verify all findings.")
 
     # Mode selection
@@ -611,7 +634,7 @@ def show_app(model):
                 plt.close(fig2)
 
             if nodules:
-                st.markdown(f"### ✅ {len(nodules)} Nodule(s) Detected")
+                st.markdown(f"### {len(nodules)} Nodule(s) Detected")
                 for n in nodules:
                     st.markdown(f"""
                     <div class="nodule-result-card routine">
@@ -639,7 +662,6 @@ def show_app(model):
             else:
                 n_slices = vol.shape[0]
                 
-                # Segment all slices
                 prog = st.progress(0)
                 status = st.empty()
                 all_masks = []
@@ -655,17 +677,15 @@ def show_app(model):
                 prog.empty()
                 shutil.rmtree(tmp, ignore_errors=True)
 
-                st.markdown(f"### ✅ {len(nodules)} Nodule(s) Detected")
+                st.markdown(f"### {len(nodules)} Nodule(s) Detected")
 
                 if nodules:
-                    # Metrics
                     col1, col2, col3, col4 = st.columns(4)
                     col1.metric("Nodules", len(nodules))
                     col2.metric("Avg Diameter", f"{np.mean([n['eq_diameter_mm'] for n in nodules]):.1f} mm")
                     col3.metric("Max Diameter", f"{max(n['eq_diameter_mm'] for n in nodules):.1f} mm")
                     col4.metric("Total Volume", f"{sum(n['volume_mm3'] for n in nodules):.0f} mm³")
 
-                    # Nodule cards
                     for n in nodules:
                         rec_text = "Routine follow-up" if n['eq_diameter_mm'] < 5 else "Short-term follow-up" if n['eq_diameter_mm'] < 8 else "Further evaluation"
                         rec_class = "routine" if n['eq_diameter_mm'] < 5 else "followup" if n['eq_diameter_mm'] < 8 else "urgent"
@@ -682,13 +702,10 @@ def show_app(model):
                         </div>
                         """, unsafe_allow_html=True)
 
-                    # Slice viewer - FIXED: use actual slice range
                     valid_slices = list(range(n_slices))
                     selected_slice = st.selectbox("View slice", valid_slices, format_func=lambda x: f"Slice {x}")
                     
-                    # Only process if slice is valid
                     if 0 <= selected_slice < n_slices:
-                        # Find nodules visible in this slice
                         visible_nodules = [n for n in nodules if n['slice_range'][0] <= selected_slice < n['slice_range'][1]]
                         
                         col1, col2 = st.columns(2)
@@ -706,7 +723,6 @@ def show_app(model):
                             st.pyplot(fig2)
                             plt.close(fig2)
 
-                    # Download results
                     rows = [{
                         "Nodule": f"N{n['id']}",
                         "Volume (mm³)": round(n['volume_mm3'], 1),
@@ -718,7 +734,7 @@ def show_app(model):
                     
                     csv = pd.DataFrame(rows).to_csv(index=False)
                     st.download_button(
-                        "📊 Download Results (CSV)",
+                        "Download Results (CSV)",
                         csv,
                         f"lungvision_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                         use_container_width=True,
