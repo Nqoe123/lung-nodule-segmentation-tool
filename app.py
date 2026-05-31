@@ -356,12 +356,15 @@ def draw_with_matplotlib(img, mask, nodules_in_slice, title):
 
 
 # ============================================================
-# LOGIN PAGE
+# LOGIN PAGE - FIXED (removed vertical_alignment parameter)
 # ============================================================
 def show_login():
     st.markdown('<div class="login-mode">', unsafe_allow_html=True)
     
-    col1, col2, col3 = st.columns([1, 2, 1], vertical_alignment="center")
+    # Add spacer for vertical centering
+    st.markdown('<div style="height: 15vh;"></div>', unsafe_allow_html=True)
+    
+    col1, col2, col3 = st.columns([1, 2, 1])
     
     with col2:
         st.markdown("""
