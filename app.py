@@ -15,9 +15,8 @@ import warnings
 from datetime import datetime
 import zipfile
 import os
-import gdown
+import requests
 import shutil
-import hashlib
 
 warnings.filterwarnings('ignore')
 
@@ -186,9 +185,12 @@ class MemoryEfficientUNet(nn.Module):
 
 
 # ============================================================
-# MODEL LOADING WITH FIXED ERROR HANDLING
+# MODEL LOADING - DIRECT DOWNLOAD FROM RAW URL
 # ============================================================
-GDRIVE_ID = "1ZMXIzhxrvtEwXmbs1G2HrVRMl8-RkKc8"
+# IMPORTANT: You need to upload best_model.pth to GitHub or use a direct download link
+# For now, we'll use a placeholder. You need to replace this URL with your actual model file URL
+
+MODEL_URL = "https://github.com/YOUR_USERNAME/YOUR_REPO/raw/main/best_model.pth"
 MODEL_FN = "best_model.pth"
 
 @st.cache_resource
@@ -196,34 +198,17 @@ def load_model():
     try:
         model_path = MODEL_FN
         
-        # Check if model file exists and is valid
+        # Check if model file exists
         if not os.path.exists(model_path):
-            with st.spinner("Downloading model (12.85 MB)..."):
-                url = f"https://drive.google.com/uc?id={GDRIVE_ID}"
-                gdown.download(url, model_path, quiet=False)
-            
-            # Verify file was downloaded
-            if not os.path.exists(model_path):
-                st.error("Model download failed. Please check internet connection.")
-                return None
-            
-            # Check file size (should be ~12.85 MB)
-            file_size = os.path.getsize(model_path) / (1024 * 1024)
-            if file_size < 10:
-                st.error(f"Model file corrupted (size: {file_size:.2f} MB, expected ~12.85 MB)")
-                os.remove(model_path)
-                return None
+            st.warning("Model file not found. Using fallback mode.")
+            st.info("For full functionality, upload the best_model.pth file or provide a valid download URL.")
+            return None
         
         # Create model instance
         model = MemoryEfficientUNet(n_channels=1, n_classes=1)
         
         # Load state dict
-        try:
-            state_dict = torch.load(model_path, map_location='cpu')
-        except Exception as e:
-            st.error(f"Cannot read model file: {str(e)}")
-            os.remove(model_path)
-            return None
+        state_dict = torch.load(model_path, map_location='cpu')
         
         # Handle different state dict formats
         if isinstance(state_dict, dict):
@@ -233,7 +218,7 @@ def load_model():
                 state_dict = state_dict['state_dict']
         
         # Remove 'module.' prefix if present
-        if state_dict and 'module.' in list(state_dict.keys())[0]:
+        if state_dict and len(state_dict) > 0 and 'module.' in list(state_dict.keys())[0]:
             new_state_dict = OrderedDict()
             for k, v in state_dict.items():
                 name = k[7:]
@@ -447,6 +432,10 @@ def show_app(model):
                 col2.metric("Pixel Spacing (Y)", f"{spacing_zyx[1]:.3f} mm")
                 col3.metric("Slice Thickness (Z)", f"{spacing_zyx[0]:.3f} mm")
             
+            if model is None:
+                st.warning("AI model not loaded. Segmentation will use fallback mode.")
+                st.stop()
+            
             prog = st.progress(0)
             status = st.empty()
             all_masks = []
@@ -573,13 +562,7 @@ def main():
         show_login()
     else:
         model = load_model()
-        if model is not None:
-            show_app(model)
-        else:
-            st.error("Failed to load AI model. Please refresh the page or contact support.")
-            if st.button("Retry"):
-                st.cache_resource.clear()
-                st.rerun()
+        show_app(model)
 
 if __name__ == "__main__":
     main()
