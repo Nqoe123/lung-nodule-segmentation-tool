@@ -15,7 +15,6 @@ import warnings
 from datetime import datetime
 import zipfile
 import os
-import gdown
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
 import shutil
@@ -119,15 +118,6 @@ st.markdown("""
     }
     .login-mode [data-testid="stSidebar"] { display: none; }
     .login-mode header { display: none; }
-    .spacing-info {
-        font-family: monospace;
-        font-size: 0.7rem;
-        color: #38bdf8;
-        background: rgba(0,0,0,0.3);
-        padding: 0.2rem 0.5rem;
-        border-radius: 4px;
-        display: inline-block;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -196,18 +186,20 @@ class MemoryEfficientUNet(nn.Module):
 
 
 # ============================================================
-# MODEL LOADING
+# MODEL LOADING - LOCAL FILE ONLY (no gdown)
 # ============================================================
-GDRIVE_ID = "1ZMXIzhxrvtEwXmbs1G2HrVRMl8-RkKc8"
 MODEL_FN = "best_model.pth"
 
 @st.cache_resource
 def load_model():
     try:
+        # Check if model file exists in the same directory
         if not os.path.exists(MODEL_FN):
-            with st.spinner("Initializing AI Core..."):
-                url = f"https://drive.google.com/uc?id={GDRIVE_ID}"
-                gdown.download(url, MODEL_FN, quiet=False)
+            st.error(f"Model file '{MODEL_FN}' not found. Please upload it to the repository.")
+            st.info("Make sure best_model.pth is in the same folder as app.py")
+            return None
+        
+        st.info(f"Loading model from {MODEL_FN}...")
         
         model = MemoryEfficientUNet(n_channels=1, n_classes=1)
         state_dict = torch.load(MODEL_FN, map_location='cpu')
@@ -218,7 +210,7 @@ def load_model():
             elif 'state_dict' in state_dict:
                 state_dict = state_dict['state_dict']
         
-        if state_dict and 'module.' in list(state_dict.keys())[0]:
+        if state_dict and len(state_dict) > 0 and 'module.' in list(state_dict.keys())[0]:
             new_state_dict = OrderedDict()
             for k, v in state_dict.items():
                 name = k[7:]
@@ -227,9 +219,12 @@ def load_model():
         
         model.load_state_dict(state_dict)
         model.eval()
+        
+        st.success("Model loaded successfully!")
         return model
+        
     except Exception as e:
-        st.error(f"System Alert: {str(e)}")
+        st.error(f"Model loading failed: {str(e)}")
         return None
 
 
@@ -311,6 +306,7 @@ def load_volume(zip_file):
             break
     
     if not mhd:
+        shutil.rmtree(tmp, ignore_errors=True)
         return None, None, None
     
     img = sitk.ReadImage(mhd)
@@ -356,12 +352,11 @@ def draw_with_matplotlib(img, mask, nodules_in_slice, title):
 
 
 # ============================================================
-# LOGIN PAGE - FIXED (removed vertical_alignment parameter)
+# LOGIN PAGE
 # ============================================================
 def show_login():
     st.markdown('<div class="login-mode">', unsafe_allow_html=True)
     
-    # Add spacer for vertical centering
     st.markdown('<div style="height: 15vh;"></div>', unsafe_allow_html=True)
     
     col1, col2, col3 = st.columns([1, 2, 1])
@@ -413,29 +408,26 @@ def show_app(model):
             st.rerun()
         st.markdown("---")
         st.info("Upload CT volume (MHD + RAW as ZIP) for automated nodule detection.")
-        st.markdown("---")
-        st.caption("Clinical measurements in mm and mm³ using DICOM metadata.")
 
     st.markdown('<div class="section-label">Clinical CT Upload</div>', unsafe_allow_html=True)
     
     upzip = st.file_uploader(
         "Upload CT Volume (ZIP with .mhd and .raw files)", 
         type=["zip"], 
-        label_visibility="collapsed",
-        help="From DICOM series converted to MHD/RAW format"
+        label_visibility="collapsed"
     )
 
     if upzip:
-        with st.spinner("Loading CT volume from DICOM..."):
+        with st.spinner("Loading CT volume..."):
             volume, spacing_zyx, temp_dir = load_volume(upzip)
         
         if volume is None:
-            st.error("Invalid CT volume. Ensure ZIP contains .mhd and .raw files from a DICOM series.")
+            st.error("Invalid CT volume. Ensure ZIP contains .mhd and .raw files.")
         else:
             num_slices = volume.shape[0]
             st.success(f"CT Loaded: {num_slices} slices")
             
-            with st.expander("Scan Parameters (from DICOM metadata)", expanded=True):
+            with st.expander("Scan Parameters", expanded=True):
                 col1, col2, col3 = st.columns(3)
                 col1.metric("Pixel Spacing (X)", f"{spacing_zyx[2]:.3f} mm")
                 col2.metric("Pixel Spacing (Y)", f"{spacing_zyx[1]:.3f} mm")
@@ -492,7 +484,7 @@ def show_app(model):
                         </div>
                         <div class="metric-box">
                             <div class="metric-val">{n['volume_mm3']:.0f}</div>
-                            <div class="metric-lbl">Volume (mm³)</div>
+                            <div class="metric-lbl">Volume</div>
                         </div>
                         <div class="metric-box">
                             <div class="metric-val">Slices {n['slice_start']}-{n['slice_end']}</div>
@@ -501,7 +493,7 @@ def show_app(model):
                         <span class="badge {badge_class}">{risk_label}</span>
                     </div>
                     <div style="margin-left: 60px; margin-bottom: 10px; font-size: 0.7rem; color: #94a3b8;">
-                        Clinical recommendation: {rec}
+                        Recommendation: {rec}
                     </div>
                     """, unsafe_allow_html=True)
                 st.markdown('</div>', unsafe_allow_html=True)
@@ -557,31 +549,30 @@ def show_app(model):
                                 bbox=dict(boxstyle='round,pad=0.3', facecolor='#0f172a', edgecolor='#06b6d4', alpha=0.9),
                             )
                     
-                    ax2.set_title(f"Slice {slice_idx} - {len(nodules_in_slice)} Nodule(s) Detected", color='#f1f5f9', fontsize=12)
+                    ax2.set_title(f"Slice {slice_idx} - {len(nodules_in_slice)} Nodule(s)", color='#f1f5f9', fontsize=12)
                     ax2.axis('off')
                     st.pyplot(fig2)
                     plt.close(fig2)
                 
-                # Export clinical report
                 df = pd.DataFrame([{
                     "Nodule ID": n['id'],
                     "Diameter (mm)": round(n['diameter_mm'], 2),
                     "Volume (mm³)": round(n['volume_mm3'], 2),
                     "Slice Range": f"{n['slice_start']}-{n['slice_end']}",
                     "Number of Slices": n['num_slices'],
-                    "Clinical Recommendation": "Routine follow-up" if n['diameter_mm'] < 5 else "Short-term follow-up" if n['diameter_mm'] < 8 else "Further evaluation"
+                    "Recommendation": "Routine follow-up" if n['diameter_mm'] < 5 else "Short-term follow-up" if n['diameter_mm'] < 8 else "Further evaluation"
                 } for n in nodules])
                 
                 csv = df.to_csv(index=False).encode('utf-8')
                 st.download_button(
-                    "Export Clinical Report (CSV)", 
+                    "Export Report (CSV)", 
                     csv, 
-                    f"clinical_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", 
+                    f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", 
                     "text/csv", 
                     use_container_width=True
                 )
             else:
-                st.info("No nodules detected in this CT volume.")
+                st.info("No nodules detected.")
 
 
 # ============================================================
@@ -595,7 +586,7 @@ def main():
         show_login()
     else:
         model = load_model()
-        if model:
+        if model is not None:
             show_app(model)
         else:
             st.stop()
