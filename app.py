@@ -18,7 +18,7 @@ import gdown
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
 import shutil
-import base64
+from scipy.ndimage import binary_closing, binary_opening
 
 warnings.filterwarnings('ignore')
 
@@ -33,7 +33,7 @@ st.set_page_config(
 )
 
 # ============================================================
-# CUSTOM CSS - FIXED LOGIN PAGE
+# CUSTOM CSS
 # ============================================================
 st.markdown("""
 <style>
@@ -45,109 +45,10 @@ st.markdown("""
     box-sizing: border-box;
 }
 
-html, body {
-    height: 100%;
-    margin: 0;
-    padding: 0;
-}
-
 .main .block-container {
     background: #0b1120;
     max-width: 1400px;
     padding: 1rem 1rem 2rem 1rem !important;
-}
-
-/* Full screen login container */
-.login-fullscreen {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: linear-gradient(135deg, #0b1120 0%, #060b14 100%);
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    z-index: 9999;
-}
-
-.login-container {
-    background: linear-gradient(160deg, #111d32 0%, #0b1221 100%);
-    border: 1px solid #1e2d4a;
-    border-radius: 28px;
-    padding: 3rem 2.5rem;
-    width: 100%;
-    max-width: 420px;
-    text-align: center;
-    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
-}
-
-.login-icon {
-    font-size: 4rem;
-    margin-bottom: 1rem;
-}
-
-.login-container h2 {
-    font-size: 1.8rem !important;
-    font-weight: 700;
-    margin-bottom: 0.5rem;
-    color: #f1f5f9;
-}
-
-.login-sub {
-    color: #64748b !important;
-    font-size: 0.85rem;
-    margin-bottom: 2rem;
-}
-
-.login-input {
-    margin-bottom: 1rem;
-}
-
-.login-input label {
-    display: block;
-    text-align: left;
-    color: #94a3b8;
-    font-size: 0.8rem;
-    margin-bottom: 0.3rem;
-}
-
-.login-input input {
-    width: 100%;
-    padding: 0.75rem 1rem;
-    background: #0f172a;
-    border: 1px solid #1e2d4a;
-    border-radius: 10px;
-    color: #f1f5f9;
-    font-size: 0.9rem;
-}
-
-.login-input input:focus {
-    outline: none;
-    border-color: #0ea5e9;
-}
-
-.login-button {
-    width: 100%;
-    padding: 0.75rem;
-    background: linear-gradient(135deg, #0ea5e9, #0369a1);
-    color: white;
-    border: none;
-    border-radius: 10px;
-    font-size: 1rem;
-    font-weight: 600;
-    cursor: pointer;
-    margin-top: 0.5rem;
-}
-
-.login-button:hover {
-    background: linear-gradient(135deg, #0284c7, #075985);
-}
-
-.login-footer {
-    margin-top: 1.5rem;
-    color: #475569;
-    font-size: 0.7rem;
 }
 
 section[data-testid="stSidebar"] {
@@ -224,6 +125,7 @@ div[data-testid="stMetricValue"] {
     gap: 1rem;
     flex-wrap: wrap;
 }
+
 .nodule-result-card.routine { border-left: 3px solid #10b981; }
 .nodule-result-card.followup { border-left: 3px solid #f59e0b; }
 .nodule-result-card.urgent { border-left: 3px solid #ef4444; }
@@ -429,39 +331,45 @@ def segment_slice(model, img, threshold=0.5):
     mask = resize((prob > threshold).astype(np.float32), shape, order=0, preserve_range=True)
     return (mask > 0.5).astype(np.uint8)
 
-def analyze_3d(mask_3d, spacing_zyx, num_slices):
+def analyze_3d(mask_3d, spacing_zyx, min_volume_mm3=20):
+    """
+    Analyze 3D mask with proper nodule detection.
+    Only keeps nodules with volume > min_volume_mm3 to filter false positives.
+    """
     sx, sy, sz = spacing_zyx[2], spacing_zyx[1], spacing_zyx[0]
-    voxel_vol = sx * sy * sz
-    labeled = label(mask_3d, connectivity=2)
+    voxel_vol_mm3 = sx * sy * sz
+    
+    # Label connected components in 3D
+    labeled = label(mask_3d, connectivity=1)  # connectivity=1 for face-touching only
     nodules = []
     
-    for rp in regionprops(labeled):
-        if rp.area < 10:
+    props = regionprops(labeled)
+    
+    for rp in props:
+        # Calculate volume in mm3
+        volume_mm3 = rp.area * voxel_vol_mm3
+        
+        # Filter out very small detections (likely noise)
+        if volume_mm3 < min_volume_mm3:
             continue
         
-        vol_mm3 = rp.area * voxel_vol
-        eq_diam = 2.0 * (3.0 * vol_mm3 / (4.0 * np.pi)) ** (1/3)
         bb = rp.bbox
-        
-        # FIXED: Use actual slice indices, not scaled values
         z_min = bb[0]
-        z_max = bb[1]
+        z_max = bb[1] - 1  # bbox gives exclusive upper bound
         
-        # Ensure slice range is within valid range
-        z_min = max(0, min(z_min, num_slices - 1))
-        z_max = max(z_min + 1, min(z_max, num_slices))
+        # Calculate equivalent diameter (sphere with same volume)
+        eq_diameter_mm = 2.0 * (3.0 * volume_mm3 / (4.0 * np.pi)) ** (1/3)
         
-        ext_z = (z_max - z_min) * sz
+        # Calculate physical height in z-direction
+        physical_height_mm = (z_max - z_min + 1) * sz
         
         nodules.append({
             'id': len(nodules) + 1,
-            'label_id': rp.label,
-            'volume_mm3': vol_mm3,
-            'eq_diameter_mm': eq_diam,
-            'max_diameter_mm': ext_z,
-            'num_voxels': rp.area,
-            'slice_range': (z_min, z_max - 1),
-            'num_slices': z_max - z_min,
+            'volume_mm3': volume_mm3,
+            'eq_diameter_mm': eq_diameter_mm,
+            'max_diameter_mm': physical_height_mm,
+            'num_slices': z_max - z_min + 1,
+            'slice_range': (z_min, z_max),
             'centroid_zyx': rp.centroid,
         })
     
@@ -483,7 +391,6 @@ def analyze_2d(mask, spacing_xy=None):
             diam_mm = None
         nodules.append({
             'id': len(nodules)+1,
-            'label_id': rp.label,
             'area_px': area_px,
             'diam_px': diam_px,
             'area_mm2': area_mm2,
@@ -514,7 +421,7 @@ def load_volume(zip_file):
     img = sitk.ReadImage(mhd)
     arr = sitk.GetArrayFromImage(img)
     sp = img.GetSpacing()
-    sp_zyx = (sp[2], sp[1], sp[0])
+    sp_zyx = (sp[2], sp[1], sp[0])  # (z, y, x) spacing in mm
     return arr, sp_zyx, tmp
 
 def make_overlay(slice_img, mask_2d, alpha=0.45):
@@ -530,45 +437,58 @@ def draw_slice_view(ax, slice_img, labeled_2d, nodules_info, title=""):
     mask_any = (labeled_2d > 0).astype(np.float32) if labeled_2d is not None else np.zeros_like(slice_img)
     overlay = make_overlay(slice_img, mask_any)
     ax.imshow(overlay, cmap='gray')
-
+    
+    # Find which nodules are visible in this slice
     for ninfo in nodules_info:
-        if 'label_id' in ninfo:
+        if 'slice_range' in ninfo:
+            # For 3D nodules, check if current slice is within range
+            current_slice = int(title.split("Slice")[1].split("-")[0].strip()) if "Slice" in title else None
+            if current_slice is not None:
+                z_min, z_max = ninfo['slice_range']
+                if current_slice < z_min or current_slice > z_max:
+                    continue
+        
+        # Get the mask for this nodule in current slice
+        if 'label_id' in ninfo and labeled_2d is not None:
             m2 = (labeled_2d == ninfo['label_id'])
-        else:
+        elif 'mask' in ninfo:
             m2 = ninfo['mask'] > 0.5
+        else:
+            continue
+            
         ys, xs = np.where(m2)
         if len(xs) == 0:
             continue
+            
         cx, cy = np.mean(xs), np.mean(ys)
         rx = (np.max(xs) - np.min(xs)) / 2 + 6
         ry = (np.max(ys) - np.min(ys)) / 2 + 6
         r = max(rx, ry)
         circ = Circle((cx, cy), r, fill=False, edgecolor='#06b6d4', linewidth=2)
         ax.add_patch(circ)
-
+        
         if 'eq_diameter_mm' in ninfo:
             label_text = f"N{ninfo['id']}\n{ninfo['eq_diameter_mm']:.1f}mm"
         elif ninfo.get('diam_mm') is not None:
             label_text = f"N{ninfo['id']}\n{ninfo['diam_mm']:.1f}mm"
         else:
             label_text = f"N{ninfo['id']}\n{ninfo['diam_px']:.0f}px"
-
+        
         ax.annotate(
             label_text,
             xy=(cx, cy), xytext=(cx + r + 8, cy - r),
             fontsize=8, fontweight='600', color='#f1f5f9',
             bbox=dict(boxstyle='round,pad=0.3', facecolor='#0f172a', edgecolor='#273755', alpha=0.9),
         )
-
+    
     ax.set_title(title, color='#f1f5f9', fontsize=11)
     ax.axis('off')
 
 
 # ============================================================
-# LOGIN PAGE - COMPLETELY REWRITTEN
+# LOGIN PAGE
 # ============================================================
 def show_login():
-    # Hide all Streamlit default elements
     st.markdown("""
     <style>
         #MainMenu {visibility: hidden;}
@@ -578,51 +498,45 @@ def show_login():
     </style>
     """, unsafe_allow_html=True)
     
-    # Create full screen login using empty container trick
-    login_placeholder = st.empty()
+    col1, col2, col3 = st.columns([1, 2, 1])
     
-    with login_placeholder.container():
-        # Center the login form using columns
-        col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.markdown("""
+        <div style="
+            background: linear-gradient(160deg, #111d32 0%, #0b1221 100%);
+            border: 1px solid #1e2d4a;
+            border-radius: 28px;
+            padding: 3rem 2.5rem;
+            text-align: center;
+            margin-top: 15vh;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+        ">
+            <div style="font-size: 4rem; margin-bottom: 1rem;">🫁</div>
+            <h2 style="font-size: 1.8rem; font-weight: 700; margin-bottom: 0.5rem; color: #f1f5f9;">LungVision AI</h2>
+            <p style="color: #64748b; font-size: 0.85rem; margin-bottom: 2rem;">Clinical Nodule Segmentation</p>
+        </div>
+        """, unsafe_allow_html=True)
         
-        with col2:
-            st.markdown("""
-            <div style="
-                background: linear-gradient(160deg, #111d32 0%, #0b1221 100%);
-                border: 1px solid #1e2d4a;
-                border-radius: 28px;
-                padding: 3rem 2.5rem;
-                text-align: center;
-                margin-top: 15vh;
-                box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
-            ">
-                <div style="font-size: 4rem; margin-bottom: 1rem;">🫁</div>
-                <h2 style="font-size: 1.8rem; font-weight: 700; margin-bottom: 0.5rem; color: #f1f5f9;">LungVision AI</h2>
-                <p style="color: #64748b; font-size: 0.85rem; margin-bottom: 2rem;">Clinical Nodule Segmentation</p>
-            </div>
-            """, unsafe_allow_html=True)
+        with st.form("login_form", clear_on_submit=False):
+            username = st.text_input("Radiologist ID", placeholder="Enter your ID")
+            password = st.text_input("Password", type="password", placeholder="Enter password")
             
-            with st.form("login_form", clear_on_submit=False):
-                username = st.text_input("Radiologist ID", placeholder="Enter your ID", key="username")
-                password = st.text_input("Password", type="password", placeholder="Enter password", key="password")
-                
-                col_a, col_b, col_c = st.columns([1, 2, 1])
-                with col_b:
-                    submitted = st.form_submit_button("Sign In", use_container_width=True)
-                
-                if submitted:
-                    if username == "radiologist" and password == "hit500":
-                        st.session_state.authenticated = True
-                        st.rerun()
-                    else:
-                        st.error("Invalid credentials")
+            col_a, col_b, col_c = st.columns([1, 2, 1])
+            with col_b:
+                submitted = st.form_submit_button("Sign In", use_container_width=True)
+            
+            if submitted:
+                if username == "radiologist" and password == "hit500":
+                    st.session_state.authenticated = True
+                    st.rerun()
+                else:
+                    st.error("Invalid credentials")
 
 
 # ============================================================
 # MAIN APP
 # ============================================================
 def show_app(model):
-    # Header
     st.markdown("""
     <div class="header-card">
         <h1>LungVision AI</h1>
@@ -630,7 +544,6 @@ def show_app(model):
     </div>
     """, unsafe_allow_html=True)
 
-    # Sidebar
     with st.sidebar:
         st.markdown("### Radiologist Panel")
         if st.button("Logout", use_container_width=True):
@@ -648,7 +561,6 @@ def show_app(model):
         st.markdown("### Disclaimer")
         st.caption("Clinical decision support only. Verify all findings.")
 
-    # Mode selection
     st.markdown('<p class="section-label">Scan Type</p>', unsafe_allow_html=True)
     mode = st.radio("", ["Single CT Slice", "CT Volume (MHD + RAW as ZIP)"], horizontal=True, label_visibility="collapsed")
 
@@ -708,7 +620,7 @@ def show_app(model):
                 st.error("Could not read volume. Ensure ZIP contains .mhd and .raw files.")
             else:
                 n_slices = vol.shape[0]
-                st.info(f"Volume loaded: {n_slices} slices")
+                st.info(f"Volume loaded: {n_slices} slices | Spacing: {sp_zyx[2]:.3f}mm (x), {sp_zyx[1]:.3f}mm (y), {sp_zyx[0]:.3f}mm (z)")
                 
                 prog = st.progress(0)
                 status = st.empty()
@@ -719,7 +631,14 @@ def show_app(model):
                     prog.progress((i + 1) / n_slices)
                 
                 mask_3d = np.stack(all_masks)
-                labeled_3d, nodules = analyze_3d(mask_3d, sp_zyx, n_slices)
+                
+                # Apply morphological closing to connect nearby slices
+                # This helps if a nodule is split across slices
+                from scipy.ndimage import binary_closing
+                struct = np.ones((3, 3, 3))  # 3x3x3 structuring element
+                mask_3d = binary_closing(mask_3d, structure=struct).astype(np.uint8)
+                
+                labeled_3d, nodules = analyze_3d(mask_3d, sp_zyx, min_volume_mm3=20)
                 
                 status.empty()
                 prog.empty()
@@ -790,7 +709,6 @@ def show_app(model):
                 else:
                     st.info("No nodules detected in this volume.")
 
-    # Footer
     st.markdown("""
     <div class="app-footer">
         LungVision AI · Clinical Decision Support · Always verify with a qualified radiologist
