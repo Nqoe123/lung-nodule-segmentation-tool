@@ -7,7 +7,5 @@ scikit-image==0.21.0
 scipy==1.10.1
 SimpleITK==2.2.1
 pydicom==2.4.4
-matplotlib==3.7.2
 gdown==4.7.1
-opencv-python==4.8.1.78
 Pillow==10.0.0
