@@ -330,37 +330,46 @@ def create_rgba_mask(mask_2d):
     h, w = mask_2d.shape
     rgba = np.zeros((h, w, 4), dtype=np.uint8)
     
-    # Red color, 40% opacity for masked areas
+    # Create red overlay with transparency where mask exists
     mask_bool = mask_2d > 0
-    rgba[mask_bool, 0] = 255  # R
-    rgba[mask_bool, 3] = 100  # A (Transparency)
+    rgba[mask_bool, 0] = 255  # Red Channel
+    rgba[mask_bool, 3] = 120  # Alpha Channel (Transparency - higher = more opaque)
     
     return rgba
 
 def create_plotly_viz(img, mask, nodules, title):
     """
-    Robust Visualization using Heatmap + Image Overlay.
-    This avoids the go.Image crash with raw data.
+    Visualizes the CT slice.
+    - If mask is empty/zero: Shows Grayscale only.
+    - If mask has data: Shows Grayscale + Red Overlay + Cyan Circles.
     """
+    
+    # --- 1. Process the CT Image for display ---
+    # Apply Lung Window and convert to uint8 for stability
+    windowed = np.clip(img, -1000, 400)
+    norm_img = (windowed - (-1000)) / (400 - (-1000))
+    img_uint8 = (norm_img * 255).astype(np.uint8)
+
     fig = go.Figure()
     
-    # 1. Background CT Slice (Heatmap is more stable than go.Image for raw data)
-    fig.add_trace(go.Heatmap(
-        z=img,
-        colorscale='Greys',
-        showscale=False,
-        zmin=img.min(), zmax=img.max()
+    # Trace 1: Background CT Slice (Grayscale)
+    fig.add_trace(go.Image(
+        z=img_uint8,
+        name='CT Slice',
+        hoverinfo='skip'
     ))
     
-    # 2. Segmentation Mask (RGBA Image Overlay)
-    rgba_mask = create_rgba_mask(mask)
-    fig.add_trace(go.Image(
-        z=rgba_mask,
-        hoverinfo='skip',
-        name='Segmentation'
-    ))
+    # Trace 2: Segmentation Mask (Red Overlay)
+    # Only add if mask has non-zero values (to save performance/cleanliness)
+    if np.any(mask > 0):
+        rgba_mask = create_rgba_mask(mask)
+        fig.add_trace(go.Image(
+            z=rgba_mask,
+            hoverinfo='skip',
+            name='Segmentation'
+        ))
 
-    # 3. Annotations
+    # --- 3. Add Annotations (Cyan Circles) ---
     for n in nodules:
         centroid = n.get('centroid')
         if centroid is None: continue
@@ -374,7 +383,8 @@ def create_plotly_viz(img, mask, nodules, title):
         fig.add_shape(type="circle",
             xref="x", yref="y",
             x0=cx - 10, y0=cy - 10, x1=cx + 10, y1=cy + 10,
-            line_color="#06b6d4", line_width=2
+            line_color="#06b6d4", # Cyan Color
+            line_width=2
         )
         
         fig.add_annotation(
@@ -394,21 +404,18 @@ def create_plotly_viz(img, mask, nodules, title):
         plot_bgcolor='rgba(0,0,0,0)',
         margin=dict(l=0, r=0, b=0, t=40),
         height=500,
-        xaxis=dict(showgrid=False, visible=False, scaleanchor="y"), # Keep aspect ratio
+        xaxis=dict(showgrid=False, visible=False, scaleanchor="y", scaleratio=1),
         yaxis=dict(showgrid=False, visible=False),
         hovermode=False
     )
+    
     return fig
-
 
 # ============================================================
 # LOGIN PAGE
 # ============================================================
 def show_login():
-    # Inject class to hide sidebar/margins via CSS
     st.markdown('<div class="login-mode">', unsafe_allow_html=True)
-    
-    # Use Native Vertical Centering
     col1, col2, col3 = st.columns([1, 2, 1], vertical_alignment="center")
     
     with col2:
@@ -433,15 +440,12 @@ def show_login():
                     st.error("Access Denied: Invalid Credentials")
 
         st.markdown("</div>", unsafe_allow_html=True)
-    
     st.markdown('</div>', unsafe_allow_html=True)
-
 
 # ============================================================
 # MAIN APP
 # ============================================================
 def show_app(model):
-    # Header
     st.markdown(f"""
     <div class="glass-panel" style="margin-bottom: 1.5rem; display: flex; justify-content: space-between; align-items: center;">
         <div>
@@ -459,7 +463,6 @@ def show_app(model):
         st.markdown("---")
         st.info("Upload a CT scan to begin analysis.")
 
-    # Main Mode Selection
     st.markdown('<div class="section-label">Acquisition Mode</div>', unsafe_allow_html=True)
     mode = st.radio("", ["Single Slice Analysis", "Full Volume Scan (3D)"], horizontal=True, label_visibility="collapsed")
 
@@ -478,10 +481,12 @@ def show_app(model):
 
             col1, col2 = st.columns(2)
             
+            # LEFT: Original Image (Pass empty mask)
             with col1:
                 fig_orig = create_plotly_viz(img, np.zeros_like(mask), [], "Source Image")
                 st.plotly_chart(fig_orig, use_container_width=True)
 
+            # RIGHT: Segmented Image (Pass real mask and nodules)
             with col2:
                 fig_anal = create_plotly_viz(img, labeled_mask > 0, nodules, f"Analysis: {len(nodules)} Detected")
                 st.plotly_chart(fig_anal, use_container_width=True)
@@ -522,7 +527,6 @@ def show_app(model):
                 num_slices = volume.shape[0]
                 st.success(f"Volume Loaded: {num_slices} slices | Spacing Z={spacing_zyx[0]:.2f}mm")
                 
-                # Progress Bar
                 prog = st.progress(0)
                 status = st.empty()
                 all_masks = []
@@ -539,7 +543,6 @@ def show_app(model):
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
                 if nodules:
-                    # Metrics
                     c1, c2, c3, c4 = st.columns(4)
                     c1.markdown(f'<div class="glass-panel" style="text-align:center"><div class="metric-val">{len(nodules)}</div><div class="metric-lbl">Total Nodules</div></div>', unsafe_allow_html=True)
                     c2.markdown(f'<div class="glass-panel" style="text-align:center"><div class="metric-val">{np.mean([n["diameter_mm"] for n in nodules]):.1f}mm</div><div class="metric-lbl">Avg Size</div></div>', unsafe_allow_html=True)
@@ -574,7 +577,6 @@ def show_app(model):
                         """, unsafe_allow_html=True)
                     st.markdown('</div>', unsafe_allow_html=True)
 
-                    # Viewer
                     st.markdown('<div class="section-label">Slice Navigator</div>', unsafe_allow_html=True)
                     slice_idx = st.slider("Select Slice Index", 0, num_slices-1, num_slices//2)
                     
@@ -589,15 +591,16 @@ def show_app(model):
 
                     col1, col2 = st.columns(2)
                     
+                    # LEFT: Original Image
                     with col1:
                         fig_raw = create_plotly_viz(volume[slice_idx], np.zeros_like(slice_mask), [], f"Raw Slice {slice_idx}")
                         st.plotly_chart(fig_raw, use_container_width=True)
 
+                    # RIGHT: Segmented Image
                     with col2:
                         fig_anal = create_plotly_viz(volume[slice_idx], slice_mask > 0, nodules_in_slice, f"Segmented: {len(nodules_in_slice)} Nodules")
                         st.plotly_chart(fig_anal, use_container_width=True)
                     
-                    # CSV
                     df = pd.DataFrame([{
                         "ID": n['id'], "Vol_mm3": round(n['volume_mm3'],2), "Diam_mm": round(n['diameter_mm'],2), 
                         "Z_Range": f"{n['slice_start']}-{n['slice_end']}", "Slices": n['num_slices']
@@ -609,12 +612,8 @@ def show_app(model):
                 else:
                     st.info("Analysis complete. No nodules detected in the volume.")
 
-# ============================================================
-# ENTRY POINT
-# ============================================================
 def main():
     if 'authenticated' not in st.session_state: st.session_state.authenticated = False
-    
     if not st.session_state.authenticated:
         show_login()
     else:
