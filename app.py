@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 from skimage.transform import resize
 from skimage.measure import label, regionprops
-from scipy.ndimage import binary_closing  # Crucial for fixing the 3D gap issue
+from scipy.ndimage import binary_closing
 import tempfile
 import SimpleITK as sitk
 from collections import OrderedDict
@@ -17,7 +17,6 @@ import zipfile
 import os
 import gdown
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import shutil
 
 warnings.filterwarnings('ignore')
@@ -32,14 +31,12 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# Advanced Styling: Glassmorphism, Gradients, Layout Fixes
+# Advanced Styling
 st.markdown("""
 <style>
     /* Global Reset */
     .stApp {
         background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
-        margin-top: 0 !important;
-        padding-top: 0 !important;
     }
     
     /* Hide default streamlit elements for cleaner look */
@@ -61,15 +58,9 @@ st.markdown("""
         border-radius: 16px;
         padding: 1.5rem;
         box-shadow: 0 4px 30px rgba(0, 0, 0, 0.3);
-        transition: transform 0.2s ease, box-shadow 0.2s ease;
-    }
-    .glass-panel:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 8px 40px rgba(0, 0, 0, 0.4);
-        border-color: rgba(56, 189, 248, 0.3);
     }
 
-    /* Typography & Headers */
+    /* Typography */
     h1, h2, h3 { color: #f8fafc; font-weight: 700; }
     .section-label {
         font-size: 0.75rem;
@@ -99,40 +90,21 @@ st.markdown("""
         border-radius: 8px;
         font-weight: 600;
         transition: all 0.2s;
-        box-shadow: 0 0 15px rgba(14, 165, 233, 0.4);
     }
-    .stButton > button:hover {
-        transform: scale(1.02);
-        box-shadow: 0 0 25px rgba(14, 165, 233, 0.6);
-    }
+    .stButton > button:hover { transform: scale(1.02); box-shadow: 0 0 25px rgba(14, 165, 233, 0.6); }
+    
     [data-testid="stFileUploader"] {
         background: rgba(15, 23, 42, 0.5);
         border: 2px dashed rgba(56, 189, 248, 0.3);
         border-radius: 12px;
         padding: 2rem;
-        transition: border-color 0.3s;
-    }
-    [data-testid="stFileUploader"]:hover {
-        border-color: #38bdf8;
-        background: rgba(15, 23, 42, 0.8);
-    }
-
-    /* Login Specific Styles - Fixes the White Space Issue */
-    .login-wrapper {
-        min-height: 100vh;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        padding: 0;
-        margin: 0;
-        background: radial-gradient(circle at 50% 50%, #1e293b 0%, #020617 100%);
-    }
-    .login-card {
-        width: 100%;
-        max-width: 400px;
-        padding: 3rem;
         text-align: center;
     }
+
+    /* Login Specific - Hide Sidebar/Top Padding */
+    .login-mode [data-testid="stSidebar"] { display: none; }
+    .login-mode .main .block-container { padding-top: 0; max-width: 100%; }
+    .login-mode header { display: none; }
 
     /* Nodule Cards */
     .nodule-row {
@@ -158,7 +130,6 @@ st.markdown("""
     .badge-urgent { background: rgba(239, 68, 68, 0.2); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.3); }
     .badge-follow { background: rgba(245, 158, 11, 0.2); color: #fcd34d; border: 1px solid rgba(245, 158, 11, 0.3); }
     .badge-routine { background: rgba(16, 185, 129, 0.2); color: #6ee7b7; border: 1px solid rgba(16, 185, 129, 0.3); }
-
 </style>
 """, unsafe_allow_html=True)
 
@@ -241,16 +212,14 @@ def load_model():
         model = MemoryEfficientUNet(n_channels=1, n_classes=1)
         state_dict = torch.load(MODEL_FN, map_location='cpu')
         
-        # Handle different checkpoint formats
         if isinstance(state_dict, dict):
             if 'model_state_dict' in state_dict: state_dict = state_dict['model_state_dict']
             elif 'state_dict' in state_dict: state_dict = state_dict['state_dict']
         
-        # Remove DataParallel wrapper if present
         if state_dict and 'module.' in list(state_dict.keys())[0]:
             new_state_dict = OrderedDict()
             for k, v in state_dict.items():
-                name = k[7:] # remove 'module.'
+                name = k[7:]
                 new_state_dict[name] = v
             state_dict = new_state_dict
         
@@ -287,27 +256,19 @@ def segment_slice(model, img, threshold=0.5):
     return (mask > 0.5).astype(np.uint8)
 
 def analyze_3d_connected(mask_3d, spacing_zyx, volume_shape):
-    """
-    FIXED 3D ANALYSIS: 
-    1. Uses binary_closing to bridge gaps between slices (Z-axis).
-    2. Labels connected components in 3D.
-    """
     z_spacing, y_spacing, x_spacing = spacing_zyx
     voxel_volume_mm3 = x_spacing * y_spacing * z_spacing
     
-    # FIX: Bridge gaps in the Z-direction. 
-    # If a nodule exists on slice 20 and 22 but drops off on 21, this connects them.
-    # Structure (3,1,1) means we look 1 slice up and 1 slice down.
+    # Bridge gaps in Z-direction
     mask_3d_closed = binary_closing(mask_3d, structure=np.ones((3, 1, 1))).astype(np.uint8)
     
-    labeled_mask = label(mask_3d_closed, connectivity=2) # Connectivity 2 checks faces + edges
+    labeled_mask = label(mask_3d_closed, connectivity=2)
     nodules = []
     
     for region in regionprops(labeled_mask):
         if region.area < 10: continue
         
         volume_mm3 = region.area * voxel_volume_mm3
-        # Equivalent spherical diameter
         diameter_mm = 2.0 * (3.0 * volume_mm3 / (4.0 * np.pi)) ** (1/3)
         
         min_z, min_y, min_x, max_z, max_y, max_x = region.bbox
@@ -357,24 +318,36 @@ def load_volume(zip_file):
     spacing = img.GetSpacing()
     return volume, (spacing[2], spacing[1], spacing[0]), tmp
 
+def normalize_for_plotly(img):
+    """Normalizes image to 0-1 float32 to prevent Plotly ValueError."""
+    img = img.astype(np.float32)
+    min_val, max_val = img.min(), img.max()
+    if max_val > min_val:
+        img = (img - min_val) / (max_val - min_val)
+    else:
+        img = np.zeros_like(img)
+    return img
+
 def create_plotly_overlay(img, mask, nodules, title):
     """
-    Creates an interactive Plotly chart instead of static Matplotlib.
+    Creates an interactive Plotly chart.
     """
+    # Normalize inputs to prevent ValueError
+    img_norm = normalize_for_plotly(img)
+    
     fig = go.Figure()
     
-    # 1. Background CT Slice (Grayscale)
+    # 1. Background CT Slice
     fig.add_trace(go.Image(
-        z=img, 
-        colorscale='gray', 
+        z=img_norm, 
+        colorscale='Greys', 
         hoverinfo='skip',
         name='CT Slice'
     ))
     
-    # 2. Segmentation Mask (Red with transparency)
-    # Create an RGBA overlay
+    # 2. Segmentation Mask (Red overlay)
     overlay = np.zeros((img.shape[0], img.shape[1], 4))
-    overlay[mask > 0] = [1, 0, 0, 0.4] # Red, 40% opacity
+    overlay[mask > 0] = [1, 0, 0, 0.4] 
     
     fig.add_trace(go.Image(
         z=overlay,
@@ -384,11 +357,17 @@ def create_plotly_overlay(img, mask, nodules, title):
 
     # 3. Draw Circles for nodules
     for n in nodules:
-        # Centroid from regionprops is usually (z, y, x) for 3D, or (y, x) for 2D
-        # Here we assume 2D slice analysis passed in
-        cy, cx = n['centroid'][0], n['centroid'][1]
+        # Handle 2D or 3D centroid access
+        centroid = n.get('centroid')
+        if centroid is None: continue
         
-        # Draw a circle shape
+        # If centroid is (y, x) from regionprops 2D
+        if len(centroid) == 2:
+            cy, cx = centroid[0], centroid[1]
+        else:
+            # If centroid is (z, y, x) from regionprops 3D
+            cy, cx = centroid[1], centroid[2]
+        
         fig.add_shape(type="circle",
             xref="x", yref="y",
             x0=cx - 10, y0=cy - 10, x1=cx + 10, y1=cy + 10,
@@ -413,7 +392,7 @@ def create_plotly_overlay(img, mask, nodules, title):
         margin=dict(l=0, r=0, b=0, t=40),
         height=500,
         xaxis=dict(showgrid=False, visible=False),
-        yaxis=dict(showgrid=False, visible=False, scaleanchor="x"), # Keep aspect ratio
+        yaxis=dict(showgrid=False, visible=False, scaleanchor="x"),
         hovermode=False
     )
     return fig
@@ -423,29 +402,36 @@ def create_plotly_overlay(img, mask, nodules, title):
 # LOGIN PAGE
 # ============================================================
 def show_login():
-    # Full-screen flex container to remove white space
-    st.markdown("""
-    <div class="login-wrapper">
-        <div class="login-card glass-panel">
+    # Inject class to hide sidebar/margins via CSS
+    st.markdown('<div class="login-mode">', unsafe_allow_html=True)
+    
+    # Use Native Vertical Centering (Requires Streamlit 1.28+)
+    col1, col2, col3 = st.columns([1, 2, 1], vertical_alignment="center")
+    
+    with col2:
+        st.markdown("""
+        <div class="glass-panel" style="text-align: center; padding: 3rem 2rem;">
             <div style="font-size: 3rem; margin-bottom: 0.5rem;">🫁</div>
             <h1 style="margin-bottom: 0.5rem; font-size: 1.8rem;">LungVision AI</h1>
             <p style="color: #94a3b8; margin-bottom: 2rem;">Secure Clinical Access Portal</p>
-    """, unsafe_allow_html=True)
+        """, unsafe_allow_html=True)
 
-    with st.form("login_form", clear_on_submit=False):
-        username = st.text_input("Radiologist ID", placeholder="ID", label_visibility="collapsed")
-        password = st.text_input("Password", type="password", placeholder="••••••••", label_visibility="collapsed")
-        submit = st.form_submit_button("Authenticate", use_container_width=True)
-        
-        if submit:
-            if username == "radiologist" and password == "hit500":
-                st.session_state.authenticated = True
-                st.session_state.username = username
-                st.rerun()
-            else:
-                st.error("Access Denied: Invalid Credentials")
+        with st.form("login_form", clear_on_submit=False):
+            username = st.text_input("Radiologist ID", placeholder="ID", label_visibility="collapsed")
+            password = st.text_input("Password", type="password", placeholder="••••••••", label_visibility="collapsed")
+            submit = st.form_submit_button("Authenticate", use_container_width=True)
+            
+            if submit:
+                if username == "radiologist" and password == "hit500":
+                    st.session_state.authenticated = True
+                    st.session_state.username = username
+                    st.rerun()
+                else:
+                    st.error("Access Denied: Invalid Credentials")
 
-    st.markdown("</div></div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+    
+    st.markdown('</div>', unsafe_allow_html=True)
 
 
 # ============================================================
@@ -491,7 +477,7 @@ def show_app(model):
             
             # Original Image
             with col1:
-                fig_orig = go.Figure(go.Image(z=img, colorscale='gray'))
+                fig_orig = go.Figure(go.Image(z=normalize_for_plotly(img), colorscale='Greys'))
                 fig_orig.update_layout(margin=dict(l=0,r=0,b=0,t=30), paper_bgcolor='rgba(0,0,0,0)', 
                                       height=500, title=dict(text="Source Image", font=dict(color='white')))
                 st.plotly_chart(fig_orig, use_container_width=True)
@@ -550,7 +536,6 @@ def show_app(model):
                 
                 # Stack and 3D Analysis
                 mask_3d = np.stack(all_masks)
-                # The fix happens here inside analyze_3d_connected
                 labeled_3d, nodules = analyze_3d_connected(mask_3d, spacing_zyx, volume.shape)
                 
                 status.empty(); prog.empty()
@@ -567,7 +552,6 @@ def show_app(model):
                     st.markdown('<div class="glass-panel">', unsafe_allow_html=True)
                     st.markdown('### Nodule Report')
                     
-                    # List Findings
                     for n in nodules:
                         risk = "routine" if n['diameter_mm'] < 5 else "followup" if n['diameter_mm'] < 8 else "urgent"
                         risk_label = "Routine" if risk == "routine" else "Short-term Follow-up" if risk == "followup" else "Specialist Consult"
@@ -597,15 +581,11 @@ def show_app(model):
                     st.markdown('<div class="section-label">Slice Navigator</div>', unsafe_allow_html=True)
                     slice_idx = st.slider("Select Slice Index", 0, num_slices-1, num_slices//2)
                     
-                    # Identify nodules in this specific slice
                     nodules_in_slice = []
                     slice_mask = labeled_3d[slice_idx]
-                    
-                    # We need to know which nodule IDs are present in this slice
                     unique_labels = np.unique(slice_mask)
                     for ul in unique_labels:
                         if ul == 0: continue
-                        # Find corresponding nodule data
                         n_data = next((n for n in nodules if n['label_id'] == ul), None)
                         if n_data:
                             nodules_in_slice.append(n_data)
@@ -614,7 +594,7 @@ def show_app(model):
                     
                     # Raw Plot
                     with col1:
-                        fig_raw = go.Figure(go.Image(z=volume[slice_idx], colorscale='gray'))
+                        fig_raw = go.Figure(go.Image(z=normalize_for_plotly(volume[slice_idx]), colorscale='Greys'))
                         fig_raw.update_layout(margin=dict(l=0,r=0,b=0,t=30), paper_bgcolor='rgba(0,0,0,0)', 
                                              height=500, title=dict(text=f"Raw Slice {slice_idx}", font=dict(color='white')))
                         st.plotly_chart(fig_raw, use_container_width=True)
