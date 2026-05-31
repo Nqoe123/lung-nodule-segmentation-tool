@@ -121,14 +121,14 @@ st.markdown("""
     }
     .login-mode [data-testid="stSidebar"] { display: none; }
     .login-mode header { display: none; }
-    .spacing-info {
+    .debug-info {
         font-family: monospace;
-        font-size: 0.75rem;
-        color: #38bdf8;
+        font-size: 0.7rem;
+        color: #94a3b8;
         background: rgba(0,0,0,0.3);
-        padding: 0.2rem 0.5rem;
+        padding: 0.5rem;
         border-radius: 4px;
-        display: inline-block;
+        margin-top: 0.5rem;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -241,31 +241,55 @@ def load_model():
 PATCH_SIZE = 128
 
 def apply_lung_window(image):
+    """Apply lung window (-1000 to 400 HU) to CT image"""
     image = np.clip(image, -1000, 400)
     return ((image + 1000) / 1400).astype(np.float32)
 
-def segment_slice(model, img, threshold=0.5):
-    shape = img.shape
+def segment_slice(model, img, threshold=0.5, debug=False):
+    """
+    Segment a single CT slice
+    Returns mask and optionally debug info
+    """
+    original_shape = img.shape
     normed = img.astype(np.float32)
+    
+    # Normalize to 0-1 range
     if normed.max() > 1.0:
         normed = normed / 255.0
+    
+    # Apply lung window
     normed = apply_lung_window(normed * 1400 - 1000) if normed.max() > 0.1 else normed
     
+    # Debug info
+    if debug:
+        st.caption(f"Debug: Image range [{normed.min():.3f}, {normed.max():.3f}], mean={normed.mean():.3f}")
+    
+    # Resize to model input size
     resized = resize(normed, (PATCH_SIZE, PATCH_SIZE), preserve_range=True)
     tensor = torch.FloatTensor(resized).unsqueeze(0).unsqueeze(0)
     
     with torch.no_grad():
         prob = torch.sigmoid(model(tensor)).squeeze().numpy()
     
-    mask = resize((prob > threshold).astype(np.float32), shape, order=0, preserve_range=True)
-    return (mask > 0.5).astype(np.uint8)
+    if debug:
+        st.caption(f"Debug: Probability map range [{prob.min():.3f}, {prob.max():.3f}], mean={prob.mean():.3f}")
+        st.caption(f"Debug: Max probability location: {np.unravel_index(prob.argmax(), prob.shape)}")
+    
+    # Resize probability map back to original size
+    prob_resized = resize(prob, original_shape, order=1, preserve_range=True)
+    mask = (prob_resized > threshold).astype(np.uint8)
+    
+    if debug:
+        st.caption(f"Debug: Mask has {mask.sum()} positive pixels ({100*mask.sum()/mask.size:.2f}%)")
+    
+    return mask
 
 def analyze_3d_connected(mask_3d, spacing_zyx, volume_shape):
     z_spacing, y_spacing, x_spacing = spacing_zyx
     voxel_volume_mm3 = x_spacing * y_spacing * z_spacing
     
-    # Display spacing info for verification
-    st.caption(f"Spacing: X={x_spacing:.3f}mm, Y={y_spacing:.3f}mm, Z={z_spacing:.3f}mm | Voxel volume: {voxel_volume_mm3:.4f}mm³")
+    st.caption(f"Spacing: X={x_spacing:.3f}mm, Y={y_spacing:.3f}mm, Z={z_spacing:.3f}mm")
+    st.caption(f"Voxel volume: {voxel_volume_mm3:.4f}mm³")
     
     mask_3d_closed = binary_closing(mask_3d, structure=np.ones((3, 1, 1))).astype(np.uint8)
     labeled_mask = label(mask_3d_closed, connectivity=2)
@@ -335,8 +359,8 @@ def load_volume(zip_file):
     
     img = sitk.ReadImage(mhd)
     volume = sitk.GetArrayFromImage(img)
-    spacing = img.GetSpacing()  # Returns (x, y, z) in mm
-    spacing_zyx = (spacing[2], spacing[1], spacing[0])  # Convert to (z, y, x)
+    spacing = img.GetSpacing()
+    spacing_zyx = (spacing[2], spacing[1], spacing[0])
     
     return volume, spacing_zyx, tmp
 
@@ -347,7 +371,7 @@ def load_dicom_slice(dicom_file):
     # Get pixel array
     image = ds.pixel_array.astype(np.float32)
     
-    # Apply RescaleSlope/Intercept
+    # Apply RescaleSlope/Intercept (convert to HU)
     if hasattr(ds, 'RescaleSlope'):
         image = image * ds.RescaleSlope
     if hasattr(ds, 'RescaleIntercept'):
@@ -356,22 +380,22 @@ def load_dicom_slice(dicom_file):
     # Get pixel spacing if available
     pixel_spacing = None
     if hasattr(ds, 'PixelSpacing'):
-        pixel_spacing = ds.PixelSpacing  # (row spacing, column spacing) in mm
+        pixel_spacing = ds.PixelSpacing
     elif hasattr(ds, 'ImagerPixelSpacing'):
         pixel_spacing = ds.ImagerPixelSpacing
     
     return image, pixel_spacing, ds
 
 def draw_with_matplotlib(img, mask, nodules_in_slice, title):
-    """Draw CT slice with nodule outlines only - NOT full mask overlay."""
+    """Draw CT slice with nodule outlines only"""
     fig, ax = plt.subplots(figsize=(6, 6), facecolor='#0b1120')
     
-    # Show grayscale CT image
-    ax.imshow(img, cmap='gray')
+    # Normalize image for display
+    img_display = (img - img.min()) / (img.max() - img.min() + 1e-9)
+    ax.imshow(img_display, cmap='gray')
     
     # Draw circles ONLY around nodules
     for nodule in nodules_in_slice:
-        # Get centroid for this nodule
         if 'centroid' in nodule and len(nodule['centroid']) >= 2:
             if len(nodule['centroid']) == 3:
                 cy, cx = nodule['centroid'][1], nodule['centroid'][2]
@@ -396,11 +420,9 @@ def draw_with_matplotlib(img, mask, nodules_in_slice, title):
         else:
             radius = 15
         
-        # Draw circle
         circle = Circle((cx, cy), radius, fill=False, edgecolor='#06b6d4', linewidth=2.5)
         ax.add_patch(circle)
         
-        # Add label
         if 'diameter_mm' in nodule:
             label_text = f"N{nodule['id']}\n{nodule['diameter_mm']:.1f}mm"
         elif 'diameter_px' in nodule:
@@ -476,6 +498,9 @@ def show_app(model):
             st.rerun()
         st.markdown("---")
         st.info("Upload a CT scan to begin analysis.")
+        
+        # Debug toggle
+        debug_mode = st.checkbox("Debug Mode", value=False, help="Show detailed processing information")
 
     # Mode Selection
     st.markdown('<div class="section-label">Acquisition Mode</div>', unsafe_allow_html=True)
@@ -492,10 +517,9 @@ def show_app(model):
             
             if upfile:
                 img = np.array(Image.open(upfile).convert('L'), dtype=np.float32)
-                pixel_spacing = None
                 
                 with st.spinner("Processing..."):
-                    mask = segment_slice(model, img)
+                    mask = segment_slice(model, img, debug=debug_mode)
                     nodules = analyze_2d(mask)
                     labeled_mask = label(mask)
                 
@@ -535,48 +559,48 @@ def show_app(model):
                         """, unsafe_allow_html=True)
                     st.markdown('</div>', unsafe_allow_html=True)
                 else:
-                    st.info("No significant findings detected.")
+                    st.warning("No nodules detected. Try adjusting the threshold or use a different slice.")
         
         else:  # DICOM File
             upfile = st.file_uploader("Upload DICOM File (.dcm)", type=["dcm"], label_visibility="collapsed")
             
             if upfile:
-                # Save uploaded DICOM to temp file
                 with tempfile.NamedTemporaryFile(delete=False, suffix='.dcm') as tmp_file:
                     tmp_file.write(upfile.getbuffer())
                     tmp_path = tmp_file.name
                 
                 try:
-                    # Load DICOM
                     image, pixel_spacing, ds = load_dicom_slice(tmp_path)
                     
                     # Display DICOM metadata
-                    with st.expander("DICOM Metadata", expanded=False):
+                    with st.expander("DICOM Metadata", expanded=debug_mode):
                         st.caption(f"Patient ID: {getattr(ds, 'PatientID', 'N/A')}")
                         st.caption(f"Study Date: {getattr(ds, 'StudyDate', 'N/A')}")
                         st.caption(f"Modality: {getattr(ds, 'Modality', 'N/A')}")
                         st.caption(f"Slice Thickness: {getattr(ds, 'SliceThickness', 'N/A')} mm")
                         if pixel_spacing:
                             st.caption(f"Pixel Spacing: {pixel_spacing[0]} x {pixel_spacing[1]} mm")
+                        st.caption(f"Image range: [{image.min():.0f}, {image.max():.0f}] HU")
                     
                     with st.spinner("Processing DICOM..."):
-                        mask = segment_slice(model, image)
+                        mask = segment_slice(model, image, debug=debug_mode)
                         nodules = analyze_2d(mask)
                         labeled_mask = label(mask)
                     
                     if pixel_spacing:
-                        st.success(f"Physical spacing detected: {pixel_spacing[0]:.3f} mm/pixel")
-                        # Convert pixel measurements to mm if spacing available
+                        st.success(f"Physical spacing: {float(pixel_spacing[0]):.3f} mm/pixel")
                         for n in nodules:
-                            n['diameter_mm'] = n['diameter_px'] * pixel_spacing[0]
-                            n['area_mm2'] = n['area_px'] * pixel_spacing[0] * pixel_spacing[1]
+                            n['diameter_mm'] = n['diameter_px'] * float(pixel_spacing[0])
+                            n['area_mm2'] = n['area_px'] * float(pixel_spacing[0]) * float(pixel_spacing[1])
                     
                     col1, col2 = st.columns(2)
                     
                     with col1:
                         fig, ax = plt.subplots(figsize=(6, 6), facecolor='#0b1120')
-                        ax.imshow(image, cmap='gray')
-                        ax.set_title("DICOM CT Slice", color='#f1f5f9', fontsize=12)
+                        # Display with lung window for better visualization
+                        img_display = apply_lung_window(image)
+                        ax.imshow(img_display, cmap='gray')
+                        ax.set_title("DICOM CT Slice (Lung Window)", color='#f1f5f9', fontsize=12)
                         ax.axis('off')
                         st.pyplot(fig)
                         plt.close(fig)
@@ -611,13 +635,18 @@ def show_app(model):
                             </div>
                             """, unsafe_allow_html=True)
                         st.markdown('</div>', unsafe_allow_html=True)
+                        
+                        # Provide feedback
+                        if len(nodules) > 0:
+                            st.success(f"✅ Found {len(nodules)} nodule(s)!")
                     else:
-                        st.info("No significant findings detected.")
+                        st.warning("No nodules detected in this slice.")
+                        st.info("Possible reasons:\n- This slice may not contain any nodules\n- The nodule may be in a different slice\n- Try adjusting the detection threshold in debug mode")
                         
                 except Exception as e:
                     st.error(f"Error reading DICOM file: {str(e)}")
                 finally:
-                    os.unlink(tmp_path)  # Clean up temp file
+                    os.unlink(tmp_path)
 
     # ================= VOLUME MODE =================
     else:
@@ -642,7 +671,7 @@ def show_app(model):
                 
                 for i in range(num_slices):
                     status.text(f"Scanning slice {i+1}/{num_slices}...")
-                    all_masks.append(segment_slice(model, volume[i]))
+                    all_masks.append(segment_slice(model, volume[i], debug=debug_mode))
                     prog.progress((i + 1) / num_slices)
                 
                 mask_3d = np.stack(all_masks)
@@ -708,15 +737,17 @@ def show_app(model):
                     
                     with col1:
                         fig, ax = plt.subplots(figsize=(6, 6), facecolor='#0b1120')
-                        ax.imshow(volume[slice_idx], cmap='gray')
-                        ax.set_title(f"Raw Slice {slice_idx}", color='#f1f5f9', fontsize=12)
+                        img_display = apply_lung_window(volume[slice_idx])
+                        ax.imshow(img_display, cmap='gray')
+                        ax.set_title(f"Raw Slice {slice_idx} (Lung Window)", color='#f1f5f9', fontsize=12)
                         ax.axis('off')
                         st.pyplot(fig)
                         plt.close(fig)
 
                     with col2:
                         fig2, ax2 = plt.subplots(figsize=(6, 6), facecolor='#0b1120')
-                        ax2.imshow(volume[slice_idx], cmap='gray')
+                        img_display = apply_lung_window(volume[slice_idx])
+                        ax2.imshow(img_display, cmap='gray')
                         
                         for n in nodules_in_slice:
                             if 'mask_in_slice' in n:
@@ -759,7 +790,7 @@ def show_app(model):
                     csv = df.to_csv(index=False).encode('utf-8')
                     st.download_button("Export Clinical Report", csv, f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", "text/csv", use_container_width=True)
                 else:
-                    st.info("Analysis complete. No nodules detected in the volume.")
+                    st.info("Analysis complete. No nodules detected in this volume.")
 
 
 # ============================================================
