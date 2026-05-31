@@ -116,17 +116,6 @@ st.markdown("""
     }
     .login-mode [data-testid="stSidebar"] { display: none; }
     .login-mode header { display: none; }
-    .debug-info {
-        font-family: monospace;
-        font-size: 0.7rem;
-        color: #94a3b8;
-        background: rgba(0,0,0,0.3);
-        padding: 0.5rem;
-        border-radius: 4px;
-        margin-top: 0.5rem;
-        white-space: pre-wrap;
-        word-break: break-all;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -237,7 +226,7 @@ def load_model():
 # UTILITIES
 # ============================================================
 PATCH_SIZE = 128
-DETECTION_THRESHOLD = 0.7  # Lower threshold for testing
+DETECTION_THRESHOLD = 0.7
 
 def apply_lung_window(image):
     image = np.clip(image, -1000, 400)
@@ -259,7 +248,7 @@ def segment_slice(model, img, threshold=DETECTION_THRESHOLD):
         prob = torch.sigmoid(model(tensor)).squeeze().numpy()
     
     mask = resize((prob > threshold).astype(np.float32), shape, order=0, preserve_range=True)
-    return (mask > 0.5).astype(np.uint8), prob  # Also return probability map for debugging
+    return (mask > 0.5).astype(np.uint8), prob
 
 def analyze_3d_connected(mask_3d, spacing_zyx, volume_shape):
     z_spacing, y_spacing, x_spacing = spacing_zyx
@@ -326,40 +315,22 @@ def load_volume(zip_file):
     
     return volume, spacing_zyx, tmp
 
-def draw_with_matplotlib(img, labeled_mask, nodules_in_slice, title, debug_info=None):
-    fig, ax = plt.subplots(figsize=(7, 7), facecolor='#0b1120')
+def create_overlay_image(slice_img, mask, alpha=0.4):
+    """Create a red overlay for the mask"""
+    # Normalize slice to 0-255
+    slice_norm = (slice_img - slice_img.min()) / (slice_img.max() - slice_img.min() + 1e-9)
+    slice_uint8 = (slice_norm * 255).astype(np.uint8)
     
-    img_display = apply_lung_window(img)
-    ax.imshow(img_display, cmap='gray')
+    # Create RGB image
+    rgb = np.stack([slice_uint8, slice_uint8, slice_uint8], axis=-1)
     
-    for nodule in nodules_in_slice:
-        nodule_mask = (labeled_mask == nodule['label_id'])
-        ys, xs = np.where(nodule_mask)
-        if len(xs) > 0:
-            cx = np.mean(xs)
-            cy = np.mean(ys)
-            width = np.max(xs) - np.min(xs)
-            height = np.max(ys) - np.min(ys)
-            radius = max(width, height) / 2 + 8
-            
-            # Draw circle
-            circle = Circle((cx, cy), radius, fill=False, edgecolor='#06b6d4', linewidth=2.5)
-            ax.add_patch(circle)
-            
-            # Draw a red dot at the center for verification
-            ax.plot(cx, cy, 'ro', markersize=4)
-            
-            label_text = f"N{nodule['id']}\n{nodule['diameter_mm']:.1f}mm"
-            ax.annotate(
-                label_text,
-                xy=(cx, cy), xytext=(cx + radius + 8, cy - radius),
-                fontsize=9, fontweight='600', color='#f1f5f9',
-                bbox=dict(boxstyle='round,pad=0.3', facecolor='#0f172a', edgecolor='#06b6d4', alpha=0.9),
-            )
+    # Apply red overlay where mask is present
+    mask_bool = mask > 0
+    rgb[mask_bool, 0] = np.clip(rgb[mask_bool, 0] + int(255 * alpha), 0, 255)  # Red channel
+    rgb[mask_bool, 1] = np.clip(rgb[mask_bool, 1] * 0.3, 0, 255)  # Green channel reduced
+    rgb[mask_bool, 2] = np.clip(rgb[mask_bool, 2] * 0.3, 0, 255)  # Blue channel reduced
     
-    ax.set_title(title, color='#f1f5f9', fontsize=12)
-    ax.axis('off')
-    return fig
+    return rgb
 
 
 # ============================================================
@@ -447,13 +418,11 @@ def show_app(model):
             prog = st.progress(0)
             status = st.empty()
             all_masks = []
-            all_probs = []
             
             for i in range(num_slices):
                 status.text(f"Analyzing slice {i+1}/{num_slices}...")
-                mask, prob = segment_slice(model, volume[i])
+                mask, _ = segment_slice(model, volume[i])
                 all_masks.append(mask)
-                all_probs.append(prob)
                 prog.progress((i + 1) / num_slices)
             
             mask_3d = np.stack(all_masks)
@@ -515,85 +484,33 @@ def show_app(model):
                 st.markdown('<div class="section-label">Slice Review</div>', unsafe_allow_html=True)
                 slice_idx = st.slider("Select slice to review", 0, num_slices - 1, num_slices // 2)
                 
-                slice_labeled = labeled_3d[slice_idx]
-                unique_labels = np.unique(slice_labeled)
+                # Get the mask for this slice (all nodules combined for overlay)
+                slice_mask = mask_3d[slice_idx]
                 
-                nodules_in_slice = []
-                for ul in unique_labels:
-                    if ul == 0:
-                        continue
-                    n_data = next((n for n in nodules if n['label_id'] == ul), None)
-                    if n_data:
-                        nodules_in_slice.append({
-                            'id': n_data['id'],
-                            'label_id': n_data['label_id'],
-                            'diameter_mm': n_data['diameter_mm']
-                        })
-
-                # Debug info
-                with st.expander("Debug Information", expanded=True):
-                    st.markdown(f"**Slice {slice_idx} Debug**")
-                    st.markdown(f"- Number of unique labels in mask: {len(unique_labels)}")
-                    st.markdown(f"- Nodules in this slice: {len(nodules_in_slice)}")
-                    
-                    for n in nodules_in_slice:
-                        nodule_mask = (slice_labeled == n['label_id'])
-                        mask_area = np.sum(nodule_mask)
-                        ys, xs = np.where(nodule_mask)
-                        if len(xs) > 0:
-                            st.markdown(f"  - N{n['id']}: mask area={mask_area} pixels, center=({np.mean(xs):.1f}, {np.mean(ys):.1f})")
-                        else:
-                            st.markdown(f"  - N{n['id']}: mask has NO pixels in this slice (should not happen)")
-
+                # Create overlay image
+                overlay_img = create_overlay_image(volume[slice_idx], slice_mask)
+                
+                # Display side by side
                 col1, col2 = st.columns(2)
                 
                 with col1:
                     fig, ax = plt.subplots(figsize=(6, 6), facecolor='#0b1120')
                     img_display = apply_lung_window(volume[slice_idx])
                     ax.imshow(img_display, cmap='gray')
-                    ax.set_title(f"Slice {slice_idx} - Original", color='#f1f5f9', fontsize=12)
+                    ax.set_title(f"Slice {slice_idx} - Original CT", color='#f1f5f9', fontsize=12)
                     ax.axis('off')
                     st.pyplot(fig)
                     plt.close(fig)
 
                 with col2:
                     fig2, ax2 = plt.subplots(figsize=(6, 6), facecolor='#0b1120')
-                    img_display = apply_lung_window(volume[slice_idx])
-                    ax2.imshow(img_display, cmap='gray')
-                    
-                    for nodule in nodules_in_slice:
-                        nodule_mask = (slice_labeled == nodule['label_id'])
-                        ys, xs = np.where(nodule_mask)
-                        if len(xs) > 0:
-                            cx = np.mean(xs)
-                            cy = np.mean(ys)
-                            width = np.max(xs) - np.min(xs)
-                            height = np.max(ys) - np.min(ys)
-                            radius = max(width, height) / 2 + 8
-                            
-                            circle = Circle((cx, cy), radius, fill=False, edgecolor='#06b6d4', linewidth=2.5)
-                            ax2.add_patch(circle)
-                            
-                            # Red dot at center
-                            ax2.plot(cx, cy, 'ro', markersize=4)
-                            
-                            label_text = f"N{nodule['id']}\n{nodule['diameter_mm']:.1f}mm"
-                            ax2.annotate(
-                                label_text,
-                                xy=(cx, cy), xytext=(cx + radius + 8, cy - radius),
-                                fontsize=9, fontweight='600', color='#f1f5f9',
-                                bbox=dict(boxstyle='round,pad=0.3', facecolor='#0f172a', edgecolor='#06b6d4', alpha=0.9),
-                            )
-                        else:
-                            # This should not happen - draw warning
-                            ax2.text(0.5, 0.5, f"Nodule {nodule['id']} has no mask in this slice", 
-                                    transform=ax2.transAxes, color='red', ha='center')
-                    
-                    ax2.set_title(f"Slice {slice_idx} - {len(nodules_in_slice)} Nodule(s)", color='#f1f5f9', fontsize=12)
+                    ax2.imshow(overlay_img)
+                    ax2.set_title(f"Slice {slice_idx} - AI Detection Overlay", color='#f1f5f9', fontsize=12)
                     ax2.axis('off')
                     st.pyplot(fig2)
                     plt.close(fig2)
                 
+                # Create CSV report
                 df = pd.DataFrame([{
                     "Nodule ID": n['id'],
                     "Diameter (mm)": round(n['diameter_mm'], 2),
