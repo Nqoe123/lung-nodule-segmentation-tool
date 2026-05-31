@@ -39,7 +39,7 @@ st.markdown("""
         background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
     }
     
-    /* Hide default streamlit elements for cleaner look */
+    /* Hide default streamlit elements */
     #MainMenu, header, footer { visibility: hidden; }
     .stDeployButton { display: none; }
 
@@ -82,6 +82,18 @@ st.markdown("""
         border-radius: 2px;
     }
 
+    /* Login Page Specific Fixes */
+    .login-mode .main {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        min-height: 100vh;
+        padding-top: 0 !important;
+        padding-bottom: 0 !important;
+    }
+    .login-mode [data-testid="stSidebar"] { display: none; }
+    .login-mode header { display: none; }
+
     /* Inputs & Buttons */
     .stButton > button {
         background: linear-gradient(90deg, #0ea5e9 0%, #6366f1 100%);
@@ -100,11 +112,6 @@ st.markdown("""
         padding: 2rem;
         text-align: center;
     }
-
-    /* Login Specific - Hide Sidebar/Top Padding */
-    .login-mode [data-testid="stSidebar"] { display: none; }
-    .login-mode .main .block-container { padding-top: 0; max-width: 100%; }
-    .login-mode header { display: none; }
 
     /* Nodule Cards */
     .nodule-row {
@@ -318,54 +325,50 @@ def load_volume(zip_file):
     spacing = img.GetSpacing()
     return volume, (spacing[2], spacing[1], spacing[0]), tmp
 
-def normalize_for_plotly(img):
-    """Normalizes image to 0-1 float32 to prevent Plotly ValueError."""
-    img = img.astype(np.float32)
-    min_val, max_val = img.min(), img.max()
-    if max_val > min_val:
-        img = (img - min_val) / (max_val - min_val)
-    else:
-        img = np.zeros_like(img)
-    return img
-
-def create_plotly_overlay(img, mask, nodules, title):
-    """
-    Creates an interactive Plotly chart.
-    """
-    # Normalize inputs to prevent ValueError
-    img_norm = normalize_for_plotly(img)
+def create_rgba_mask(mask_2d):
+    """Creates an RGBA overlay array for the mask."""
+    h, w = mask_2d.shape
+    rgba = np.zeros((h, w, 4), dtype=np.uint8)
     
+    # Red color, 40% opacity for masked areas
+    mask_bool = mask_2d > 0
+    rgba[mask_bool, 0] = 255  # R
+    rgba[mask_bool, 3] = 100  # A (Transparency)
+    
+    return rgba
+
+def create_plotly_viz(img, mask, nodules, title):
+    """
+    Robust Visualization using Heatmap + Image Overlay.
+    This avoids the go.Image crash with raw data.
+    """
     fig = go.Figure()
     
-    # 1. Background CT Slice
-    fig.add_trace(go.Image(
-        z=img_norm, 
-        colorscale='Greys', 
-        hoverinfo='skip',
-        name='CT Slice'
+    # 1. Background CT Slice (Heatmap is more stable than go.Image for raw data)
+    fig.add_trace(go.Heatmap(
+        z=img,
+        colorscale='Greys',
+        showscale=False,
+        zmin=img.min(), zmax=img.max()
     ))
     
-    # 2. Segmentation Mask (Red overlay)
-    overlay = np.zeros((img.shape[0], img.shape[1], 4))
-    overlay[mask > 0] = [1, 0, 0, 0.4] 
-    
+    # 2. Segmentation Mask (RGBA Image Overlay)
+    rgba_mask = create_rgba_mask(mask)
     fig.add_trace(go.Image(
-        z=overlay,
+        z=rgba_mask,
         hoverinfo='skip',
         name='Segmentation'
     ))
 
-    # 3. Draw Circles for nodules
+    # 3. Annotations
     for n in nodules:
-        # Handle 2D or 3D centroid access
         centroid = n.get('centroid')
         if centroid is None: continue
         
-        # If centroid is (y, x) from regionprops 2D
+        # Handle 2D (y,x) or 3D (z,y,x) centroids
         if len(centroid) == 2:
             cy, cx = centroid[0], centroid[1]
         else:
-            # If centroid is (z, y, x) from regionprops 3D
             cy, cx = centroid[1], centroid[2]
         
         fig.add_shape(type="circle",
@@ -391,8 +394,8 @@ def create_plotly_overlay(img, mask, nodules, title):
         plot_bgcolor='rgba(0,0,0,0)',
         margin=dict(l=0, r=0, b=0, t=40),
         height=500,
-        xaxis=dict(showgrid=False, visible=False),
-        yaxis=dict(showgrid=False, visible=False, scaleanchor="x"),
+        xaxis=dict(showgrid=False, visible=False, scaleanchor="y"), # Keep aspect ratio
+        yaxis=dict(showgrid=False, visible=False),
         hovermode=False
     )
     return fig
@@ -405,7 +408,7 @@ def show_login():
     # Inject class to hide sidebar/margins via CSS
     st.markdown('<div class="login-mode">', unsafe_allow_html=True)
     
-    # Use Native Vertical Centering (Requires Streamlit 1.28+)
+    # Use Native Vertical Centering
     col1, col2, col3 = st.columns([1, 2, 1], vertical_alignment="center")
     
     with col2:
@@ -475,19 +478,14 @@ def show_app(model):
 
             col1, col2 = st.columns(2)
             
-            # Original Image
             with col1:
-                fig_orig = go.Figure(go.Image(z=normalize_for_plotly(img), colorscale='Greys'))
-                fig_orig.update_layout(margin=dict(l=0,r=0,b=0,t=30), paper_bgcolor='rgba(0,0,0,0)', 
-                                      height=500, title=dict(text="Source Image", font=dict(color='white')))
+                fig_orig = create_plotly_viz(img, np.zeros_like(mask), [], "Source Image")
                 st.plotly_chart(fig_orig, use_container_width=True)
 
-            # Analysis Image
             with col2:
-                fig_anal = create_plotly_overlay(img, labeled_mask > 0, nodules, f"Analysis: {len(nodules)} Detected")
+                fig_anal = create_plotly_viz(img, labeled_mask > 0, nodules, f"Analysis: {len(nodules)} Detected")
                 st.plotly_chart(fig_anal, use_container_width=True)
 
-            # Results List
             if nodules:
                 st.markdown('<div class="glass-panel">', unsafe_allow_html=True)
                 st.markdown(f"### Detected Findings ({len(nodules)})")
@@ -524,7 +522,7 @@ def show_app(model):
                 num_slices = volume.shape[0]
                 st.success(f"Volume Loaded: {num_slices} slices | Spacing Z={spacing_zyx[0]:.2f}mm")
                 
-                # Progress Bar for Segmentation
+                # Progress Bar
                 prog = st.progress(0)
                 status = st.empty()
                 all_masks = []
@@ -534,7 +532,6 @@ def show_app(model):
                     all_masks.append(segment_slice(model, volume[i]))
                     prog.progress((i + 1) / num_slices)
                 
-                # Stack and 3D Analysis
                 mask_3d = np.stack(all_masks)
                 labeled_3d, nodules = analyze_3d_connected(mask_3d, spacing_zyx, volume.shape)
                 
@@ -542,7 +539,7 @@ def show_app(model):
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
                 if nodules:
-                    # Metrics Header
+                    # Metrics
                     c1, c2, c3, c4 = st.columns(4)
                     c1.markdown(f'<div class="glass-panel" style="text-align:center"><div class="metric-val">{len(nodules)}</div><div class="metric-lbl">Total Nodules</div></div>', unsafe_allow_html=True)
                     c2.markdown(f'<div class="glass-panel" style="text-align:center"><div class="metric-val">{np.mean([n["diameter_mm"] for n in nodules]):.1f}mm</div><div class="metric-lbl">Avg Size</div></div>', unsafe_allow_html=True)
@@ -577,7 +574,7 @@ def show_app(model):
                         """, unsafe_allow_html=True)
                     st.markdown('</div>', unsafe_allow_html=True)
 
-                    # Interactive Slice Viewer
+                    # Viewer
                     st.markdown('<div class="section-label">Slice Navigator</div>', unsafe_allow_html=True)
                     slice_idx = st.slider("Select Slice Index", 0, num_slices-1, num_slices//2)
                     
@@ -592,19 +589,15 @@ def show_app(model):
 
                     col1, col2 = st.columns(2)
                     
-                    # Raw Plot
                     with col1:
-                        fig_raw = go.Figure(go.Image(z=normalize_for_plotly(volume[slice_idx]), colorscale='Greys'))
-                        fig_raw.update_layout(margin=dict(l=0,r=0,b=0,t=30), paper_bgcolor='rgba(0,0,0,0)', 
-                                             height=500, title=dict(text=f"Raw Slice {slice_idx}", font=dict(color='white')))
+                        fig_raw = create_plotly_viz(volume[slice_idx], np.zeros_like(slice_mask), [], f"Raw Slice {slice_idx}")
                         st.plotly_chart(fig_raw, use_container_width=True)
 
-                    # Analysis Plot
                     with col2:
-                        fig_anal = create_plotly_overlay(volume[slice_idx], slice_mask > 0, nodules_in_slice, f"Segmented: {len(nodules_in_slice)} Nodules")
+                        fig_anal = create_plotly_viz(volume[slice_idx], slice_mask > 0, nodules_in_slice, f"Segmented: {len(nodules_in_slice)} Nodules")
                         st.plotly_chart(fig_anal, use_container_width=True)
                     
-                    # CSV Export
+                    # CSV
                     df = pd.DataFrame([{
                         "ID": n['id'], "Vol_mm3": round(n['volume_mm3'],2), "Diam_mm": round(n['diameter_mm'],2), 
                         "Z_Range": f"{n['slice_start']}-{n['slice_end']}", "Slices": n['num_slices']
