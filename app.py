@@ -348,7 +348,10 @@ def create_overlay_image_pil(slice_img, nodules_in_slice):
 def show_login():
     st.markdown('<div class="login-mode">', unsafe_allow_html=True)
     
-    col1, col2, col3 = st.columns([1, 2, 1], vertical_alignment="center")
+    # Remove vertical_alignment parameter - use empty space for centering
+    st.markdown('<div style="height: 15vh;"></div>', unsafe_allow_html=True)
+    
+    col1, col2, col3 = st.columns([1, 2, 1])
     
     with col2:
         st.markdown("""
@@ -371,8 +374,6 @@ def show_login():
                     st.rerun()
                 else:
                     st.error("Access Denied: Invalid Credentials")
-
-        st.markdown("</div>", unsafe_allow_html=True)
     
     st.markdown('</div>', unsafe_allow_html=True)
 
