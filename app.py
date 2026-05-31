@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 from skimage.transform import resize
 from skimage.measure import label, regionprops
+from scipy.ndimage import binary_closing  # Crucial for fixing the 3D gap issue
 import tempfile
 import SimpleITK as sitk
 from collections import OrderedDict
@@ -15,184 +16,178 @@ from datetime import datetime
 import zipfile
 import os
 import gdown
-import matplotlib.pyplot as plt
-from matplotlib.patches import Circle
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import shutil
 
 warnings.filterwarnings('ignore')
 
 # ============================================================
-# PAGE CONFIG
+# PAGE CONFIG & GLOBAL CSS
 # ============================================================
 st.set_page_config(
-    page_title="LungVision AI | Nodule Segmentation",
-    page_icon="",
+    page_title="LungVision AI",
+    page_icon="🫁",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
 
-# ============================================================
-# CUSTOM CSS
-# ============================================================
+# Advanced Styling: Glassmorphism, Gradients, Layout Fixes
 st.markdown("""
 <style>
-.main .block-container {
-    background: #0b1120;
-    max-width: 1400px;
-    padding: 1rem 1rem 2rem 1rem !important;
-}
-section[data-testid="stSidebar"] {
-    background: linear-gradient(180deg, #0d1526 0%, #060b14 100%) !important;
-    border-right: 1px solid #1e2d4a !important;
-}
-.header-card {
-    background: linear-gradient(135deg, #0c2340 0%, #132e52 100%);
-    border: 1px solid #1e2d4a;
-    border-radius: 16px;
-    padding: 1.25rem 2rem;
-    margin-bottom: 1.5rem;
-}
-.header-card h1 {
-    font-size: 1.6rem !important;
-    font-weight: 700 !important;
-    margin: 0;
-    color: #f1f5f9;
-}
-.header-card .tagline {
-    color: #94a3b8 !important;
-    font-size: 0.85rem;
-    margin-top: 0.2rem;
-}
-.section-label {
-    font-size: 0.7rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: #64748b !important;
-    margin-bottom: 0.5rem;
-}
-.stButton > button {
-    background: linear-gradient(135deg, #0ea5e9, #0369a1) !important;
-    color: white !important;
-    font-weight: 600 !important;
-    border: none !important;
-    border-radius: 10px !important;
-}
-[data-testid="stFileUploader"] > section > div {
-    background: #111827 !important;
-    border: 2px dashed #1e2d4a !important;
-    border-radius: 14px !important;
-    padding: 1.5rem !important;
-}
-div[data-testid="stMetric"] {
-    background: #111827 !important;
-    padding: 0.8rem 1rem !important;
-    border-radius: 12px !important;
-    border: 1px solid #1e2d4a !important;
-}
-div[data-testid="stMetricValue"] {
-    font-size: 1.3rem !important;
-    color: #f1f5f9 !important;
-}
-.nodule-result-card {
-    background: #111827;
-    border: 1px solid #1e2d4a;
-    border-radius: 12px;
-    padding: 1rem 1.2rem;
-    margin-bottom: 0.5rem;
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-    flex-wrap: wrap;
-}
-.nodule-result-card.routine { border-left: 3px solid #10b981; }
-.nodule-result-card.followup { border-left: 3px solid #f59e0b; }
-.nodule-result-card.urgent { border-left: 3px solid #ef4444; }
-.nodule-id-badge {
-    background: rgba(14,165,233,0.12);
-    color: #0ea5e9;
-    font-weight: 700;
-    font-size: 0.75rem;
-    padding: 0.25rem 0.6rem;
-    border-radius: 6px;
-    min-width: 45px;
-    text-align: center;
-}
-.nodule-measures {
-    display: flex;
-    gap: 1.5rem;
-    flex-wrap: wrap;
-}
-.nodule-measure {
-    display: flex;
-    flex-direction: column;
-}
-.nodule-measure .val {
-    font-size: 1rem;
-    font-weight: 700;
-    color: #f1f5f9;
-}
-.nodule-measure .lbl {
-    font-size: 0.6rem;
-    text-transform: uppercase;
-    color: #64748b;
-}
-.nodule-rec {
-    font-size: 0.7rem;
-    font-weight: 500;
-    padding: 0.2rem 0.6rem;
-    border-radius: 6px;
-}
-.nodule-rec.routine { background: rgba(16,185,129,0.12); color: #10b981; }
-.nodule-rec.followup { background: rgba(245,158,11,0.12); color: #f59e0b; }
-.nodule-rec.urgent { background: rgba(239,68,68,0.12); color: #ef4444; }
-.app-footer {
-    text-align: center;
-    color: #64748b !important;
-    font-size: 0.7rem;
-    margin-top: 2rem;
-    padding-top: 1rem;
-    border-top: 1px solid #1e2d4a;
-}
-#MainMenu, footer, header { visibility: hidden; }
+    /* Global Reset */
+    .stApp {
+        background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
+        margin-top: 0 !important;
+        padding-top: 0 !important;
+    }
+    
+    /* Hide default streamlit elements for cleaner look */
+    #MainMenu, header, footer { visibility: hidden; }
+    .stDeployButton { display: none; }
+
+    /* Sidebar Styling */
+    [data-testid="stSidebar"] {
+        background: rgba(15, 23, 42, 0.95);
+        backdrop-filter: blur(20px);
+        border-right: 1px solid rgba(255,255,255,0.05);
+    }
+
+    /* Glassmorphism Cards */
+    .glass-panel {
+        background: rgba(30, 41, 59, 0.6);
+        backdrop-filter: blur(12px);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 16px;
+        padding: 1.5rem;
+        box-shadow: 0 4px 30px rgba(0, 0, 0, 0.3);
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }
+    .glass-panel:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 8px 40px rgba(0, 0, 0, 0.4);
+        border-color: rgba(56, 189, 248, 0.3);
+    }
+
+    /* Typography & Headers */
+    h1, h2, h3 { color: #f8fafc; font-weight: 700; }
+    .section-label {
+        font-size: 0.75rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        color: #94a3b8;
+        margin-bottom: 1rem;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+    .section-label::before {
+        content: '';
+        display: block;
+        width: 20px;
+        height: 2px;
+        background: #38bdf8;
+        border-radius: 2px;
+    }
+
+    /* Inputs & Buttons */
+    .stButton > button {
+        background: linear-gradient(90deg, #0ea5e9 0%, #6366f1 100%);
+        color: white;
+        border: none;
+        border-radius: 8px;
+        font-weight: 600;
+        transition: all 0.2s;
+        box-shadow: 0 0 15px rgba(14, 165, 233, 0.4);
+    }
+    .stButton > button:hover {
+        transform: scale(1.02);
+        box-shadow: 0 0 25px rgba(14, 165, 233, 0.6);
+    }
+    [data-testid="stFileUploader"] {
+        background: rgba(15, 23, 42, 0.5);
+        border: 2px dashed rgba(56, 189, 248, 0.3);
+        border-radius: 12px;
+        padding: 2rem;
+        transition: border-color 0.3s;
+    }
+    [data-testid="stFileUploader"]:hover {
+        border-color: #38bdf8;
+        background: rgba(15, 23, 42, 0.8);
+    }
+
+    /* Login Specific Styles - Fixes the White Space Issue */
+    .login-wrapper {
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        margin: 0;
+        background: radial-gradient(circle at 50% 50%, #1e293b 0%, #020617 100%);
+    }
+    .login-card {
+        width: 100%;
+        max-width: 400px;
+        padding: 3rem;
+        text-align: center;
+    }
+
+    /* Nodule Cards */
+    .nodule-row {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        padding: 0.8rem;
+        border-bottom: 1px solid rgba(255,255,255,0.05);
+    }
+    .nodule-row:last-child { border-bottom: none; }
+    .metric-box {
+        background: rgba(0,0,0,0.2);
+        padding: 0.5rem 1rem;
+        border-radius: 8px;
+        text-align: center;
+        flex: 1;
+    }
+    .metric-val { font-size: 1.1rem; font-weight: 700; color: #f1f5f9; }
+    .metric-lbl { font-size: 0.7rem; color: #94a3b8; text-transform: uppercase; }
+    
+    /* Badges */
+    .badge { padding: 4px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 700; }
+    .badge-urgent { background: rgba(239, 68, 68, 0.2); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.3); }
+    .badge-follow { background: rgba(245, 158, 11, 0.2); color: #fcd34d; border: 1px solid rgba(245, 158, 11, 0.3); }
+    .badge-routine { background: rgba(16, 185, 129, 0.2); color: #6ee7b7; border: 1px solid rgba(16, 185, 129, 0.3); }
+
 </style>
 """, unsafe_allow_html=True)
 
 
 # ============================================================
-# MODEL ARCHITECTURE
+# MODEL ARCHITECTURE (UNet)
 # ============================================================
 class DoubleConv(nn.Module):
     def __init__(self, in_channels, out_channels):
-        super(DoubleConv, self).__init__()
+        super().__init__()
         self.double_conv = nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
+            nn.BatchNorm2d(out_channels), nn.ReLU(inplace=True),
             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True)
+            nn.BatchNorm2d(out_channels), nn.ReLU(inplace=True)
         )
-    def forward(self, x):
-        return self.double_conv(x)
+    def forward(self, x): return self.double_conv(x)
 
 class Down(nn.Module):
     def __init__(self, in_channels, out_channels):
-        super(Down, self).__init__()
-        self.maxpool_conv = nn.Sequential(
-            nn.MaxPool2d(2),
-            DoubleConv(in_channels, out_channels)
-        )
-    def forward(self, x):
-        return self.maxpool_conv(x)
+        super().__init__()
+        self.maxpool_conv = nn.Sequential(nn.MaxPool2d(2), DoubleConv(in_channels, out_channels))
+    def forward(self, x): return self.maxpool_conv(x)
 
 class Up(nn.Module):
     def __init__(self, in_channels, out_channels, bilinear=True):
-        super(Up, self).__init__()
-        if bilinear:
-            self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
-        else:
-            self.up = nn.ConvTranspose2d(in_channels // 2, in_channels // 2, kernel_size=2, stride=2)
+        super().__init__()
+        if bilinear: self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+        else: self.up = nn.ConvTranspose2d(in_channels // 2, in_channels // 2, kernel_size=2, stride=2)
         self.conv = DoubleConv(in_channels, out_channels)
     def forward(self, x1, x2):
         x1 = self.up(x1)
@@ -204,14 +199,13 @@ class Up(nn.Module):
 
 class OutConv(nn.Module):
     def __init__(self, in_channels, out_channels):
-        super(OutConv, self).__init__()
+        super().__init__()
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
-    def forward(self, x):
-        return self.conv(x)
+    def forward(self, x): return self.conv(x)
 
 class MemoryEfficientUNet(nn.Module):
     def __init__(self, n_channels=1, n_classes=1, bilinear=True):
-        super(MemoryEfficientUNet, self).__init__()
+        super().__init__()
         self.inc = DoubleConv(n_channels, 32)
         self.down1 = Down(32, 64)
         self.down2 = Down(64, 128)
@@ -224,15 +218,9 @@ class MemoryEfficientUNet(nn.Module):
         self.up4 = Up(64, 32, bilinear)
         self.outc = OutConv(32, n_classes)
     def forward(self, x):
-        x1 = self.inc(x)
-        x2 = self.down1(x1)
-        x3 = self.down2(x2)
-        x4 = self.down3(x3)
+        x1 = self.inc(x); x2 = self.down1(x1); x3 = self.down2(x2); x4 = self.down3(x3)
         x5 = self.down4(x4)
-        x = self.up1(x5, x4)
-        x = self.up2(x, x3)
-        x = self.up3(x, x2)
-        x = self.up4(x, x1)
+        x = self.up1(x5, x4); x = self.up2(x, x3); x = self.up3(x, x2); x = self.up4(x, x1)
         return self.outc(x)
 
 
@@ -246,22 +234,23 @@ MODEL_FN = "best_model.pth"
 def load_model():
     try:
         if not os.path.exists(MODEL_FN):
-            with st.spinner("Downloading model..."):
+            with st.spinner("Initializing AI Core..."):
                 url = f"https://drive.google.com/uc?id={GDRIVE_ID}"
                 gdown.download(url, MODEL_FN, quiet=False)
         
         model = MemoryEfficientUNet(n_channels=1, n_classes=1)
         state_dict = torch.load(MODEL_FN, map_location='cpu')
         
-        if isinstance(state_dict, dict) and 'model_state_dict' in state_dict:
-            state_dict = state_dict['model_state_dict']
-        elif isinstance(state_dict, dict) and 'state_dict' in state_dict:
-            state_dict = state_dict['state_dict']
+        # Handle different checkpoint formats
+        if isinstance(state_dict, dict):
+            if 'model_state_dict' in state_dict: state_dict = state_dict['model_state_dict']
+            elif 'state_dict' in state_dict: state_dict = state_dict['state_dict']
         
+        # Remove DataParallel wrapper if present
         if state_dict and 'module.' in list(state_dict.keys())[0]:
             new_state_dict = OrderedDict()
             for k, v in state_dict.items():
-                name = k[7:]
+                name = k[7:] # remove 'module.'
                 new_state_dict[name] = v
             state_dict = new_state_dict
         
@@ -269,12 +258,12 @@ def load_model():
         model.eval()
         return model
     except Exception as e:
-        st.error(f"Failed to load model: {str(e)}")
+        st.error(f"System Alert: {str(e)}")
         return None
 
 
 # ============================================================
-# UTILITIES
+# LOGIC & UTILITIES
 # ============================================================
 PATCH_SIZE = 128
 
@@ -285,9 +274,7 @@ def apply_lung_window(image):
 def segment_slice(model, img, threshold=0.5):
     shape = img.shape
     normed = img.astype(np.float32)
-    if normed.max() > 1.0:
-        normed = normed / 255.0
-    
+    if normed.max() > 1.0: normed = normed / 255.0
     normed = apply_lung_window(normed * 1400 - 1000) if normed.max() > 0.1 else normed
     
     resized = resize(normed, (PATCH_SIZE, PATCH_SIZE), preserve_range=True)
@@ -299,392 +286,368 @@ def segment_slice(model, img, threshold=0.5):
     mask = resize((prob > threshold).astype(np.float32), shape, order=0, preserve_range=True)
     return (mask > 0.5).astype(np.uint8)
 
-def analyze_3d_correct(mask_3d, spacing_zyx, volume_shape):
+def analyze_3d_connected(mask_3d, spacing_zyx, volume_shape):
     """
-    CORRECT 3D analysis - keeps nodules connected across slices
+    FIXED 3D ANALYSIS: 
+    1. Uses binary_closing to bridge gaps between slices (Z-axis).
+    2. Labels connected components in 3D.
     """
     z_spacing, y_spacing, x_spacing = spacing_zyx
     voxel_volume_mm3 = x_spacing * y_spacing * z_spacing
     
-    # Label connected components in 3D
-    labeled_mask = label(mask_3d, connectivity=2)
+    # FIX: Bridge gaps in the Z-direction. 
+    # If a nodule exists on slice 20 and 22 but drops off on 21, this connects them.
+    # Structure (3,1,1) means we look 1 slice up and 1 slice down.
+    mask_3d_closed = binary_closing(mask_3d, structure=np.ones((3, 1, 1))).astype(np.uint8)
+    
+    labeled_mask = label(mask_3d_closed, connectivity=2) # Connectivity 2 checks faces + edges
     nodules = []
     
     for region in regionprops(labeled_mask):
-        if region.area < 10:
-            continue
+        if region.area < 10: continue
         
         volume_mm3 = region.area * voxel_volume_mm3
+        # Equivalent spherical diameter
         diameter_mm = 2.0 * (3.0 * volume_mm3 / (4.0 * np.pi)) ** (1/3)
         
         min_z, min_y, min_x, max_z, max_y, max_x = region.bbox
-        
         min_z = max(0, min_z)
         max_z = min(volume_shape[0], max_z)
-        slice_start = int(min_z)
-        slice_end = int(max_z - 1)
-        
-        if slice_end < slice_start:
-            slice_end = slice_start
         
         nodules.append({
             'id': len(nodules) + 1,
             'label_id': region.label,
             'volume_mm3': volume_mm3,
             'diameter_mm': diameter_mm,
-            'slice_start': slice_start,
-            'slice_end': slice_end,
-            'num_slices': slice_end - slice_start + 1,
-            'centroid': region.centroid,
-            'bbox': region.bbox
+            'slice_start': int(min_z),
+            'slice_end': int(max_z - 1),
+            'num_slices': int(max_z - min_z),
+            'centroid': region.centroid
         })
     
     nodules.sort(key=lambda x: x['slice_start'])
     return labeled_mask, nodules
 
-def analyze_2d_correct(mask_2d):
+def analyze_2d(mask_2d):
     labeled = label(mask_2d, connectivity=2)
     nodules = []
-    
     for region in regionprops(labeled):
-        if region.area < 10:
-            continue
-        
+        if region.area < 10: continue
         area_px = region.area
         diam_px = 2 * np.sqrt(area_px / np.pi)
-        
-        nodules.append({
-            'id': len(nodules) + 1,
-            'label_id': region.label,
-            'area_px': area_px,
-            'diameter_px': diam_px,
-            'centroid': region.centroid
-        })
-    
+        nodules.append({'id': len(nodules) + 1, 'label_id': region.label, 'diameter_px': diam_px, 'area_px': area_px})
     return nodules
 
 def load_volume(zip_file):
     tmp = tempfile.mkdtemp()
     zpath = os.path.join(tmp, "upload.zip")
-    with open(zpath, "wb") as f:
-        f.write(zip_file.getbuffer())
-    with zipfile.ZipFile(zpath, 'r') as zf:
-        zf.extractall(tmp)
+    with open(zpath, "wb") as f: f.write(zip_file.getbuffer())
+    with zipfile.ZipFile(zpath, 'r') as zf: zf.extractall(tmp)
     
     mhd = None
     for root, _, files in os.walk(tmp):
         for fn in files:
-            if fn.lower().endswith('.mhd'):
-                mhd = os.path.join(root, fn)
-                break
-        if mhd:
-            break
+            if fn.lower().endswith('.mhd'): mhd = os.path.join(root, fn); break
+        if mhd: break
     
-    if not mhd:
-        shutil.rmtree(tmp, ignore_errors=True)
-        return None, None, None
+    if not mhd: return None, None, None
     
     img = sitk.ReadImage(mhd)
     volume = sitk.GetArrayFromImage(img)
     spacing = img.GetSpacing()
-    spacing_zyx = (spacing[2], spacing[1], spacing[0])
-    
-    return volume, spacing_zyx, tmp
+    return volume, (spacing[2], spacing[1], spacing[0]), tmp
 
-def make_overlay(slice_img, mask_2d, alpha=0.45):
-    norm = (slice_img - slice_img.min()) / (slice_img.max() - slice_img.min() + 1e-9)
-    rgb = np.stack([norm, norm, norm], axis=-1)
-    mask_bool = mask_2d > 0.5
-    rgb[mask_bool, 0] = np.clip(rgb[mask_bool, 0] + alpha, 0, 1)
-    rgb[mask_bool, 1] = np.clip(rgb[mask_bool, 1] * 0.25, 0, 1)
-    rgb[mask_bool, 2] = np.clip(rgb[mask_bool, 2] * 0.25, 0, 1)
-    return rgb
-
-def draw_slice_with_nodules(ax, slice_img, labeled_mask, nodules_for_this_slice):
-    """Draw slice with nodule outlines - FIXED VERSION"""
-    # Create overlay with all masks
-    overlay = make_overlay(slice_img, (labeled_mask > 0).astype(np.float32))
-    ax.imshow(overlay)
+def create_plotly_overlay(img, mask, nodules, title):
+    """
+    Creates an interactive Plotly chart instead of static Matplotlib.
+    """
+    fig = go.Figure()
     
-    # Draw each nodule that appears in this slice
-    for nodule in nodules_for_this_slice:
-        # Get the mask for this specific nodule in this slice
-        nodule_mask = (labeled_mask == nodule['label_id'])
+    # 1. Background CT Slice (Grayscale)
+    fig.add_trace(go.Image(
+        z=img, 
+        colorscale='gray', 
+        hoverinfo='skip',
+        name='CT Slice'
+    ))
+    
+    # 2. Segmentation Mask (Red with transparency)
+    # Create an RGBA overlay
+    overlay = np.zeros((img.shape[0], img.shape[1], 4))
+    overlay[mask > 0] = [1, 0, 0, 0.4] # Red, 40% opacity
+    
+    fig.add_trace(go.Image(
+        z=overlay,
+        hoverinfo='skip',
+        name='Segmentation'
+    ))
+
+    # 3. Draw Circles for nodules
+    for n in nodules:
+        # Centroid from regionprops is usually (z, y, x) for 3D, or (y, x) for 2D
+        # Here we assume 2D slice analysis passed in
+        cy, cx = n['centroid'][0], n['centroid'][1]
         
-        if not np.any(nodule_mask):
-            continue
-        
-        # Get contour coordinates
-        ys, xs = np.where(nodule_mask)
-        if len(xs) == 0:
-            continue
-        
-        # Calculate center
-        cx = np.mean(xs)
-        cy = np.mean(ys)
-        
-        # Calculate radius (use bounding box size)
-        radius = max((np.max(xs) - np.min(xs)) / 2, (np.max(ys) - np.min(ys)) / 2) + 5
-        
-        # Draw circle
-        circle = Circle((cx, cy), radius, fill=False, edgecolor='#06b6d4', linewidth=2)
-        ax.add_patch(circle)
-        
-        # Add label
-        if 'diameter_mm' in nodule:
-            label_text = f"N{nodule['id']}\n{nodule['diameter_mm']:.1f}mm"
-        elif 'diameter_px' in nodule:
-            label_text = f"N{nodule['id']}\n{nodule['diameter_px']:.0f}px"
-        else:
-            label_text = f"N{nodule['id']}"
-        
-        ax.annotate(
-            label_text,
-            xy=(cx, cy), xytext=(cx + radius + 8, cy - radius),
-            fontsize=9, fontweight='600', color='#f1f5f9',
-            bbox=dict(boxstyle='round,pad=0.3', facecolor='#0f172a', edgecolor='#273755', alpha=0.9),
+        # Draw a circle shape
+        fig.add_shape(type="circle",
+            xref="x", yref="y",
+            x0=cx - 10, y0=cy - 10, x1=cx + 10, y1=cy + 10,
+            line_color="#06b6d4", line_width=2
         )
-    
-    ax.axis('off')
+        
+        fig.add_annotation(
+            x=cx + 15, y=cy,
+            text=f"N{n['id']}",
+            showarrow=False,
+            font=dict(color="#06b6d4", size=12, family="Arial Black"),
+            bgcolor="rgba(0,0,0,0.6)",
+            bordercolor="#06b6d4",
+            borderwidth=1,
+            borderpad=4
+        )
+
+    fig.update_layout(
+        title=dict(text=title, font=dict(color='#f1f5f9', size=16)),
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        margin=dict(l=0, r=0, b=0, t=40),
+        height=500,
+        xaxis=dict(showgrid=False, visible=False),
+        yaxis=dict(showgrid=False, visible=False, scaleanchor="x"), # Keep aspect ratio
+        hovermode=False
+    )
+    return fig
 
 
 # ============================================================
 # LOGIN PAGE
 # ============================================================
 def show_login():
+    # Full-screen flex container to remove white space
     st.markdown("""
-    <style>#MainMenu{visibility:hidden;}header{visibility:hidden;}footer{visibility:hidden;}</style>
+    <div class="login-wrapper">
+        <div class="login-card glass-panel">
+            <div style="font-size: 3rem; margin-bottom: 0.5rem;">🫁</div>
+            <h1 style="margin-bottom: 0.5rem; font-size: 1.8rem;">LungVision AI</h1>
+            <p style="color: #94a3b8; margin-bottom: 2rem;">Secure Clinical Access Portal</p>
     """, unsafe_allow_html=True)
-    
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        st.markdown("""
-        <div style="background:linear-gradient(160deg,#111d32 0%,#0b1221 100%);border:1px solid #1e2d4a;border-radius:28px;padding:3rem 2.5rem;text-align:center;margin-top:15vh;">
-            <div style="font-size:4rem;margin-bottom:1rem;">🫁</div>
-            <h2 style="font-size:1.8rem;font-weight:700;margin-bottom:0.5rem;color:#f1f5f9;">LungVision AI</h2>
-            <p style="color:#64748b;font-size:0.85rem;margin-bottom:2rem;">Clinical Nodule Segmentation</p>
-        </div>
-        """, unsafe_allow_html=True)
+
+    with st.form("login_form", clear_on_submit=False):
+        username = st.text_input("Radiologist ID", placeholder="ID", label_visibility="collapsed")
+        password = st.text_input("Password", type="password", placeholder="••••••••", label_visibility="collapsed")
+        submit = st.form_submit_button("Authenticate", use_container_width=True)
         
-        with st.form("login_form"):
-            username = st.text_input("Radiologist ID", placeholder="Enter your ID")
-            password = st.text_input("Password", type="password", placeholder="Enter password")
-            submitted = st.form_submit_button("Sign In", use_container_width=True)
-            
-            if submitted:
-                if username == "radiologist" and password == "hit500":
-                    st.session_state.authenticated = True
-                    st.rerun()
-                else:
-                    st.error("Invalid credentials")
+        if submit:
+            if username == "radiologist" and password == "hit500":
+                st.session_state.authenticated = True
+                st.session_state.username = username
+                st.rerun()
+            else:
+                st.error("Access Denied: Invalid Credentials")
+
+    st.markdown("</div></div>", unsafe_allow_html=True)
 
 
 # ============================================================
 # MAIN APP
 # ============================================================
 def show_app(model):
-    st.markdown("""
-    <div class="header-card">
-        <h1>LungVision AI</h1>
-        <p class="tagline">Automatic Lung Nodule Detection and Segmentation</p>
+    # Header
+    st.markdown(f"""
+    <div class="glass-panel" style="margin-bottom: 1.5rem; display: flex; justify-content: space-between; align-items: center;">
+        <div>
+            <h1 style="margin:0; font-size: 1.5rem;">LungVision <span style="color:#38bdf8">AI</span></h1>
+            <div style="color:#94a3b8; font-size: 0.85rem;">User: {st.session_state.get('username', 'Guest')} | System Online</div>
+        </div>
     </div>
     """, unsafe_allow_html=True)
-
+    
     with st.sidebar:
-        st.markdown("### Radiologist Panel")
-        if st.button("Logout", use_container_width=True):
+        st.markdown('<div class="glass-panel"><h3>Control Panel</h3></div>', unsafe_allow_html=True)
+        if st.button("Terminate Session", use_container_width=True):
             st.session_state.clear()
             st.rerun()
         st.markdown("---")
-        st.markdown("### Information")
-        st.caption("Upload a CT scan to detect and segment lung nodules.")
-        st.markdown("---")
-        st.markdown("### Instructions")
-        st.caption("1. Select scan type below")
-        st.caption("2. Upload PNG/JPG for single slice or ZIP with .mhd/.raw for volume")
-        st.caption("3. View detected nodules")
+        st.info("Upload a CT scan to begin analysis.")
 
-    st.markdown('<p class="section-label">Scan Type</p>', unsafe_allow_html=True)
-    mode = st.radio("", ["Single CT Slice", "CT Volume (MHD + RAW as ZIP)"], horizontal=True, label_visibility="collapsed")
+    # Main Mode Selection
+    st.markdown('<div class="section-label">Acquisition Mode</div>', unsafe_allow_html=True)
+    mode = st.radio("", ["Single Slice Analysis", "Full Volume Scan (3D)"], horizontal=True, label_visibility="collapsed")
 
-    # ========== SINGLE SLICE MODE ==========
+    # ================= SINGLE SLICE =================
     if "Single" in mode:
-        st.markdown('<p class="section-label">Upload CT Slice</p>', unsafe_allow_html=True)
-        upfile = st.file_uploader("Select PNG or JPG", type=["png", "jpg", "jpeg"], label_visibility="collapsed")
+        st.markdown('<div class="section-label">Data Input</div>', unsafe_allow_html=True)
+        upfile = st.file_uploader("Upload CT Slice (PNG/JPG)", type=["png", "jpg", "jpeg"], label_visibility="collapsed")
 
         if upfile:
             img = np.array(Image.open(upfile).convert('L'), dtype=np.float32)
             
-            with st.spinner("Analyzing..."):
+            with st.spinner("Processing neural network inference..."):
                 mask = segment_slice(model, img)
-                nodules = analyze_2d_correct(mask)
+                nodules = analyze_2d(mask)
                 labeled_mask = label(mask)
-            
+
             col1, col2 = st.columns(2)
+            
+            # Original Image
             with col1:
-                fig, ax = plt.subplots(figsize=(6, 6))
-                ax.imshow(img, cmap='gray')
-                ax.set_title("Original CT Slice", color='#f1f5f9', fontsize=12)
-                ax.axis('off')
-                st.pyplot(fig)
-                plt.close(fig)
-            
+                fig_orig = go.Figure(go.Image(z=img, colorscale='gray'))
+                fig_orig.update_layout(margin=dict(l=0,r=0,b=0,t=30), paper_bgcolor='rgba(0,0,0,0)', 
+                                      height=500, title=dict(text="Source Image", font=dict(color='white')))
+                st.plotly_chart(fig_orig, use_container_width=True)
+
+            # Analysis Image
             with col2:
-                fig2, ax2 = plt.subplots(figsize=(6, 6))
-                
-                # Pass nodules with their label_ids
-                nodules_for_display = []
-                for n in nodules:
-                    nodules_for_display.append({
-                        'id': n['id'],
-                        'label_id': n['label_id'],
-                        'diameter_px': n['diameter_px']
-                    })
-                
-                draw_slice_with_nodules(ax2, img, labeled_mask, nodules_for_display)
-                ax2.set_title(f"{len(nodules)} Nodule(s) Detected", color='#f1f5f9', fontsize=12)
-                st.pyplot(fig2)
-                plt.close(fig2)
-            
+                fig_anal = create_plotly_overlay(img, labeled_mask > 0, nodules, f"Analysis: {len(nodules)} Detected")
+                st.plotly_chart(fig_anal, use_container_width=True)
+
+            # Results List
             if nodules:
-                st.markdown(f"### {len(nodules)} Nodule(s) Detected")
+                st.markdown('<div class="glass-panel">', unsafe_allow_html=True)
+                st.markdown(f"### Detected Findings ({len(nodules)})")
                 for n in nodules:
                     st.markdown(f"""
-                    <div class="nodule-result-card routine">
-                        <div class="nodule-id-badge">N{n['id']}</div>
-                        <div class="nodule-measures">
-                            <div class="nodule-measure"><span class="val">{n['diameter_px']:.0f} px</span><span class="lbl">Diameter</span></div>
-                            <div class="nodule-measure"><span class="val">{n['area_px']:.0f} px²</span><span class="lbl">Area</span></div>
+                    <div class="nodule-row">
+                        <div style="font-weight:700; color:#38bdf8; font-size:1.1rem;">N{n['id']}</div>
+                        <div class="metric-box">
+                            <div class="metric-val">{n['diameter_px']:.0f}</div>
+                            <div class="metric-lbl">Diameter (px)</div>
+                        </div>
+                        <div class="metric-box">
+                            <div class="metric-val">{n['area_px']:.0f}</div>
+                            <div class="metric-lbl">Area (px²)</div>
                         </div>
                     </div>
                     """, unsafe_allow_html=True)
+                st.markdown('</div>', unsafe_allow_html=True)
             else:
-                st.info("No nodules detected in this slice.")
+                st.info("No significant findings detected.")
 
-    # ========== VOLUME MODE ==========
+    # ================= VOLUME MODE =================
     else:
-        st.markdown('<p class="section-label">Upload CT Volume</p>', unsafe_allow_html=True)
-        upzip = st.file_uploader("Select ZIP with .mhd and .raw files", type=["zip"], label_visibility="collapsed")
+        st.markdown('<div class="section-label">Data Input</div>', unsafe_allow_html=True)
+        upzip = st.file_uploader("Upload Volume (ZIP containing .mhd/.raw)", type=["zip"], label_visibility="collapsed")
 
         if upzip:
-            with st.spinner("Loading volume..."):
+            with st.spinner("Loading DICOM Series..."):
                 volume, spacing_zyx, temp_dir = load_volume(upzip)
             
             if volume is None:
-                st.error("Could not read volume. Ensure ZIP contains .mhd and .raw files.")
+                st.error("Error reading ZIP archive. Please check file structure.")
             else:
-                num_slices, height, width = volume.shape
-                st.info(f"Volume: {num_slices} slices | {height}x{width} pixels | Spacing: X={spacing_zyx[2]:.3f}mm, Y={spacing_zyx[1]:.3f}mm, Z={spacing_zyx[0]:.3f}mm")
+                num_slices = volume.shape[0]
+                st.success(f"Volume Loaded: {num_slices} slices | Spacing Z={spacing_zyx[0]:.2f}mm")
                 
+                # Progress Bar for Segmentation
                 prog = st.progress(0)
                 status = st.empty()
                 all_masks = []
+                
                 for i in range(num_slices):
-                    status.text(f"Segmenting slice {i+1}/{num_slices}")
+                    status.text(f"Scanning slice {i+1}/{num_slices}...")
                     all_masks.append(segment_slice(model, volume[i]))
                     prog.progress((i + 1) / num_slices)
                 
+                # Stack and 3D Analysis
                 mask_3d = np.stack(all_masks)
-                labeled_3d, nodules = analyze_3d_correct(mask_3d, spacing_zyx, volume.shape)
+                # The fix happens here inside analyze_3d_connected
+                labeled_3d, nodules = analyze_3d_connected(mask_3d, spacing_zyx, volume.shape)
                 
-                status.empty()
-                prog.empty()
+                status.empty(); prog.empty()
                 shutil.rmtree(temp_dir, ignore_errors=True)
-                
-                st.markdown(f"### {len(nodules)} Nodule(s) Detected")
-                
+
                 if nodules:
-                    col1, col2, col3, col4 = st.columns(4)
-                    col1.metric("Nodules", len(nodules))
-                    col2.metric("Avg Diameter", f"{np.mean([n['diameter_mm'] for n in nodules]):.1f} mm")
-                    col3.metric("Largest", f"{max(n['diameter_mm'] for n in nodules):.1f} mm")
-                    col4.metric("Total Volume", f"{sum(n['volume_mm3'] for n in nodules):.0f} mm³")
+                    # Metrics Header
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.markdown(f'<div class="glass-panel" style="text-align:center"><div class="metric-val">{len(nodules)}</div><div class="metric-lbl">Total Nodules</div></div>', unsafe_allow_html=True)
+                    c2.markdown(f'<div class="glass-panel" style="text-align:center"><div class="metric-val">{np.mean([n["diameter_mm"] for n in nodules]):.1f}mm</div><div class="metric-lbl">Avg Size</div></div>', unsafe_allow_html=True)
+                    c3.markdown(f'<div class="glass-panel" style="text-align:center"><div class="metric-val">{max(n["diameter_mm"] for n in nodules):.1f}mm</div><div class="metric-lbl">Max Size</div></div>', unsafe_allow_html=True)
+                    c4.markdown(f'<div class="glass-panel" style="text-align:center"><div class="metric-val">{sum(n["num_slices"] for n in nodules)}</div><div class="metric-lbl">Affected Slices</div></div>', unsafe_allow_html=True)
+
+                    st.markdown('<div class="glass-panel">', unsafe_allow_html=True)
+                    st.markdown('### Nodule Report')
                     
-                    # Display nodule cards
+                    # List Findings
                     for n in nodules:
-                        rec = "Routine follow-up" if n['diameter_mm'] < 5 else "Short-term follow-up" if n['diameter_mm'] < 8 else "Further evaluation"
-                        rec_class = "routine" if n['diameter_mm'] < 5 else "followup" if n['diameter_mm'] < 8 else "urgent"
+                        risk = "routine" if n['diameter_mm'] < 5 else "followup" if n['diameter_mm'] < 8 else "urgent"
+                        risk_label = "Routine" if risk == "routine" else "Short-term Follow-up" if risk == "followup" else "Specialist Consult"
+                        badge_class = f"badge-{risk}"
                         
                         st.markdown(f"""
-                        <div class="nodule-result-card {rec_class}">
-                            <div class="nodule-id-badge">N{n['id']}</div>
-                            <div class="nodule-measures">
-                                <div class="nodule-measure"><span class="val">{n['diameter_mm']:.1f} mm</span><span class="lbl">Diameter</span></div>
-                                <div class="nodule-measure"><span class="val">{n['volume_mm3']:.0f} mm³</span><span class="lbl">Volume</span></div>
-                                <div class="nodule-measure"><span class="val">Slices {n['slice_start']}-{n['slice_end']}</span><span class="lbl">Range</span></div>
+                        <div class="nodule-row">
+                            <div style="min-width:60px; font-weight:bold; color:#f1f5f9;">Nodule {n['id']}</div>
+                            <div class="metric-box">
+                                <div class="metric-val">{n['diameter_mm']:.1f} mm</div>
+                                <div class="metric-lbl">Diameter</div>
                             </div>
-                            <div class="nodule-rec {rec_class}">{rec}</div>
+                            <div class="metric-box">
+                                <div class="metric-val">{n['volume_mm3']:.0f}</div>
+                                <div class="metric-lbl">Vol (mm³)</div>
+                            </div>
+                            <div class="metric-box">
+                                <div class="metric-val">{n['slice_start']}-{n['slice_end']}</div>
+                                <div class="metric-lbl">Range</div>
+                            </div>
+                            <span class="badge {badge_class}">{risk_label}</span>
                         </div>
                         """, unsafe_allow_html=True)
+                    st.markdown('</div>', unsafe_allow_html=True)
+
+                    # Interactive Slice Viewer
+                    st.markdown('<div class="section-label">Slice Navigator</div>', unsafe_allow_html=True)
+                    slice_idx = st.slider("Select Slice Index", 0, num_slices-1, num_slices//2)
                     
-                    # Slice viewer
-                    slice_idx = st.selectbox("View slice", list(range(num_slices)), format_func=lambda x: f"Slice {x}")
+                    # Identify nodules in this specific slice
+                    nodules_in_slice = []
+                    slice_mask = labeled_3d[slice_idx]
                     
-                    # Find which nodules appear in this slice
-                    nodules_in_this_slice = []
-                    for n in nodules:
-                        if n['slice_start'] <= slice_idx <= n['slice_end']:
-                            nodules_in_this_slice.append({
-                                'id': n['id'],
-                                'label_id': n['label_id'],
-                                'diameter_mm': n['diameter_mm']
-                            })
-                    
+                    # We need to know which nodule IDs are present in this slice
+                    unique_labels = np.unique(slice_mask)
+                    for ul in unique_labels:
+                        if ul == 0: continue
+                        # Find corresponding nodule data
+                        n_data = next((n for n in nodules if n['label_id'] == ul), None)
+                        if n_data:
+                            nodules_in_slice.append(n_data)
+
                     col1, col2 = st.columns(2)
+                    
+                    # Raw Plot
                     with col1:
-                        fig, ax = plt.subplots(figsize=(6, 6))
-                        ax.imshow(volume[slice_idx], cmap='gray')
-                        ax.set_title(f"Original - Slice {slice_idx}", color='#f1f5f9', fontsize=12)
-                        ax.axis('off')
-                        st.pyplot(fig)
-                        plt.close(fig)
-                    
+                        fig_raw = go.Figure(go.Image(z=volume[slice_idx], colorscale='gray'))
+                        fig_raw.update_layout(margin=dict(l=0,r=0,b=0,t=30), paper_bgcolor='rgba(0,0,0,0)', 
+                                             height=500, title=dict(text=f"Raw Slice {slice_idx}", font=dict(color='white')))
+                        st.plotly_chart(fig_raw, use_container_width=True)
+
+                    # Analysis Plot
                     with col2:
-                        fig2, ax2 = plt.subplots(figsize=(6, 6))
-                        slice_labeled = labeled_3d[slice_idx]
-                        draw_slice_with_nodules(ax2, volume[slice_idx], slice_labeled, nodules_in_this_slice)
-                        ax2.set_title(f"Slice {slice_idx} - {len(nodules_in_this_slice)} Nodule(s)", color='#f1f5f9', fontsize=12)
-                        st.pyplot(fig2)
-                        plt.close(fig2)
+                        fig_anal = create_plotly_overlay(volume[slice_idx], slice_mask > 0, nodules_in_slice, f"Segmented: {len(nodules_in_slice)} Nodules")
+                        st.plotly_chart(fig_anal, use_container_width=True)
                     
-                    # Download CSV
-                    rows = [{
-                        "Nodule": f"N{n['id']}",
-                        "Volume (mm³)": round(n['volume_mm3'], 1),
-                        "Diameter (mm)": round(n['diameter_mm'], 2),
-                        "Slice Range": f"{n['slice_start']}-{n['slice_end']}",
-                        "Number of Slices": n['num_slices']
-                    } for n in nodules]
+                    # CSV Export
+                    df = pd.DataFrame([{
+                        "ID": n['id'], "Vol_mm3": round(n['volume_mm3'],2), "Diam_mm": round(n['diameter_mm'],2), 
+                        "Z_Range": f"{n['slice_start']}-{n['slice_end']}", "Slices": n['num_slices']
+                    } for n in nodules])
                     
-                    csv = pd.DataFrame(rows).to_csv(index=False)
-                    st.download_button("Download Results (CSV)", csv, f"lungvision_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", use_container_width=True)
+                    csv = df.to_csv(index=False).encode('utf-8')
+                    st.download_button("Export Clinical Report", csv, f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", "text/csv", use_container_width=True)
+
                 else:
-                    st.info("No nodules detected in this volume.")
-
-    st.markdown("""
-    <div class="app-footer">
-        LungVision AI · Clinical Decision Support · Always verify with a qualified radiologist
-    </div>
-    """, unsafe_allow_html=True)
-
+                    st.info("Analysis complete. No nodules detected in the volume.")
 
 # ============================================================
 # ENTRY POINT
 # ============================================================
 def main():
-    if 'authenticated' not in st.session_state:
-        st.session_state.authenticated = False
+    if 'authenticated' not in st.session_state: st.session_state.authenticated = False
     
     if not st.session_state.authenticated:
         show_login()
-        return
-    
-    model = load_model()
-    if model is None:
-        st.stop()
-    
-    show_app(model)
-
+    else:
+        model = load_model()
+        if model: show_app(model)
+        else: st.stop()
 
 if __name__ == "__main__":
     main()
