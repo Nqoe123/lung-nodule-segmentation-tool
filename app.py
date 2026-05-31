@@ -6,8 +6,7 @@ import numpy as np
 import pandas as pd
 from skimage.transform import resize
 from skimage.measure import label, regionprops
-from scipy.ndimage import binary_closing, binary_dilation
-from scipy import ndimage
+from scipy.ndimage import binary_closing
 import tempfile
 import SimpleITK as sitk
 from collections import OrderedDict
@@ -121,7 +120,7 @@ st.markdown("""
 
 
 # ============================================================
-# MODEL ARCHITECTURE
+# MODEL ARCHITECTURE (SAME AS TRAINING)
 # ============================================================
 class DoubleConv(nn.Module):
     def __init__(self, in_channels, out_channels):
@@ -223,80 +222,109 @@ def load_model():
 
 
 # ============================================================
-# UTILITIES WITH ENHANCED MASK EXPANSION
+# CORRECT INFERENCE - PROCESS ENTIRE SLICE IN PATCHES
 # ============================================================
 PATCH_SIZE = 128
-DETECTION_THRESHOLD = 0.65  # Slightly lower to capture more
+STRIDE = 64  # 50% overlap to avoid missing nodules at patch boundaries
 
 def apply_lung_window(image):
     image = np.clip(image, -1000, 400)
     return ((image + 1000) / 1400).astype(np.float32)
 
-def expand_mask_to_nodule(mask, original_img, expansion_iterations=5):
+def segment_slice_patch_based(model, img, threshold=0.7):
     """
-    Expand the mask using morphological dilation to cover the full nodule.
-    Also use edge detection to find nodule boundaries.
+    Process the entire slice by sliding a 128x128 window.
+    This matches the training patch extraction method.
     """
-    # Binary dilation
-    struct = np.ones((5, 5))  # 5x5 structuring element
-    expanded = binary_dilation(mask, structure=struct, iterations=expansion_iterations).astype(np.uint8)
+    h, w = img.shape
+    normalized = img.astype(np.float32)
     
-    # Use edge detection on original image to find potential nodule boundaries
-    from skimage import filters
-    edges = filters.sobel(original_img)
+    # Apply lung window
+    normalized = apply_lung_window(normalized)
     
-    # Find connected components and expand to include edge boundaries
-    labeled = label(expanded, connectivity=2)
-    for region in regionprops(labeled):
-        if region.area > 0:
-            # Get bounding box and expand
-            min_r, min_c, max_r, max_c = region.bbox
-            # Expand bbox by 20%
-            h = max_r - min_r
-            w = max_c - min_c
-            min_r = max(0, min_r - int(h * 0.3))
-            max_r = min(original_img.shape[0], max_r + int(h * 0.3))
-            min_c = max(0, min_c - int(w * 0.3))
-            max_c = min(original_img.shape[1], max_c + int(w * 0.3))
+    # Create output mask
+    mask = np.zeros((h, w), dtype=np.float32)
+    count = np.zeros((h, w), dtype=np.float32)
+    
+    # Slide window across the image
+    for y in range(0, h - PATCH_SIZE + 1, STRIDE):
+        for x in range(0, w - PATCH_SIZE + 1, STRIDE):
+            # Extract patch
+            patch = normalized[y:y+PATCH_SIZE, x:x+PATCH_SIZE]
             
-            # Fill the expanded region
-            expanded[min_r:max_r, min_c:max_c] = 1
+            # Ensure patch is exactly 128x128
+            if patch.shape != (PATCH_SIZE, PATCH_SIZE):
+                continue
+            
+            # Prepare for model
+            patch_tensor = torch.FloatTensor(patch).unsqueeze(0).unsqueeze(0)
+            
+            # Inference
+            with torch.no_grad():
+                prob = torch.sigmoid(model(patch_tensor)).squeeze().numpy()
+            
+            # Add to mask (average overlapping regions)
+            mask[y:y+PATCH_SIZE, x:x+PATCH_SIZE] += prob
+            count[y:y+PATCH_SIZE, x:x+PATCH_SIZE] += 1
     
-    return expanded
-
-def segment_slice(model, img, threshold=DETECTION_THRESHOLD):
-    shape = img.shape
-    normed = img.astype(np.float32)
+    # Handle edges - process remaining patches
+    # Right edge
+    if w % STRIDE != 0:
+        x_start = max(0, w - PATCH_SIZE)
+        for y in range(0, h - PATCH_SIZE + 1, STRIDE):
+            patch = normalized[y:y+PATCH_SIZE, x_start:x_start+PATCH_SIZE]
+            if patch.shape == (PATCH_SIZE, PATCH_SIZE):
+                patch_tensor = torch.FloatTensor(patch).unsqueeze(0).unsqueeze(0)
+                with torch.no_grad():
+                    prob = torch.sigmoid(model(patch_tensor)).squeeze().numpy()
+                mask[y:y+PATCH_SIZE, x_start:x_start+PATCH_SIZE] += prob
+                count[y:y+PATCH_SIZE, x_start:x_start+PATCH_SIZE] += 1
     
-    if normed.max() > 1.0:
-        normed = normed / 255.0
+    # Bottom edge
+    if h % STRIDE != 0:
+        y_start = max(0, h - PATCH_SIZE)
+        for x in range(0, w - PATCH_SIZE + 1, STRIDE):
+            patch = normalized[y_start:y_start+PATCH_SIZE, x:x+PATCH_SIZE]
+            if patch.shape == (PATCH_SIZE, PATCH_SIZE):
+                patch_tensor = torch.FloatTensor(patch).unsqueeze(0).unsqueeze(0)
+                with torch.no_grad():
+                    prob = torch.sigmoid(model(patch_tensor)).squeeze().numpy()
+                mask[y_start:y_start+PATCH_SIZE, x:x+PATCH_SIZE] += prob
+                count[y_start:y_start+PATCH_SIZE, x:x+PATCH_SIZE] += 1
     
-    normed = apply_lung_window(normed * 1400 - 1000) if normed.max() > 0.1 else normed
+    # Bottom-right corner
+    if w % STRIDE != 0 and h % STRIDE != 0:
+        x_start = max(0, w - PATCH_SIZE)
+        y_start = max(0, h - PATCH_SIZE)
+        patch = normalized[y_start:y_start+PATCH_SIZE, x_start:x_start+PATCH_SIZE]
+        if patch.shape == (PATCH_SIZE, PATCH_SIZE):
+            patch_tensor = torch.FloatTensor(patch).unsqueeze(0).unsqueeze(0)
+            with torch.no_grad():
+                prob = torch.sigmoid(model(patch_tensor)).squeeze().numpy()
+            mask[y_start:y_start+PATCH_SIZE, x_start:x_start+PATCH_SIZE] += prob
+            count[y_start:y_start+PATCH_SIZE, x_start:x_start+PATCH_SIZE] += 1
     
-    resized = resize(normed, (PATCH_SIZE, PATCH_SIZE), preserve_range=True)
-    tensor = torch.FloatTensor(resized).unsqueeze(0).unsqueeze(0)
+    # Average overlapping regions
+    count = np.maximum(count, 1)  # Avoid division by zero
+    mask = mask / count
     
-    with torch.no_grad():
-        prob = torch.sigmoid(model(tensor)).squeeze().numpy()
+    # Apply threshold
+    binary_mask = (mask > threshold).astype(np.uint8)
     
-    mask = resize((prob > threshold).astype(np.float32), shape, order=0, preserve_range=True)
-    binary_mask = (mask > 0.5).astype(np.uint8)
+    # Morphological closing to fill small holes
+    binary_mask = binary_closing(binary_mask, structure=np.ones((3, 3))).astype(np.uint8)
     
-    # Expand mask to cover full nodule
-    expanded_mask = expand_mask_to_nodule(binary_mask, img, expansion_iterations=4)
-    
-    return binary_mask, expanded_mask, prob
+    return binary_mask, mask
 
 def analyze_3d_connected(mask_3d, spacing_zyx, volume_shape):
     z_spacing, y_spacing, x_spacing = spacing_zyx
     voxel_volume_mm3 = x_spacing * y_spacing * z_spacing
     
-    mask_3d_closed = binary_closing(mask_3d, structure=np.ones((3, 3, 3))).astype(np.uint8)
-    labeled_mask = label(mask_3d_closed, connectivity=2)
+    labeled_mask = label(mask_3d, connectivity=2)
     nodules = []
     
     for region in regionprops(labeled_mask):
-        if region.area < 50:
+        if region.area < 30:
             continue
         
         volume_mm3 = region.area * voxel_volume_mm3
@@ -353,14 +381,11 @@ def load_volume(zip_file):
     return volume, spacing_zyx, tmp
 
 def create_overlay_image(slice_img, mask, alpha=0.6):
-    """
-    Create a red overlay ONLY where the mask is present.
-    """
-    # Normalize slice to 0-255 range
+    # Normalize slice for display
     slice_norm = (slice_img - slice_img.min()) / (slice_img.max() - slice_img.min() + 1e-9)
     slice_uint8 = (slice_norm * 255).astype(np.uint8)
     
-    # Create RGB image
+    # Create RGB
     rgb = np.stack([slice_uint8, slice_uint8, slice_uint8], axis=-1).astype(np.float32)
     
     # Apply red overlay on mask
@@ -377,7 +402,6 @@ def create_overlay_image(slice_img, mask, alpha=0.6):
 # ============================================================
 def show_login():
     st.markdown('<div class="login-mode">', unsafe_allow_html=True)
-    
     st.markdown('<div style="height: 15vh;"></div>', unsafe_allow_html=True)
     
     col1, col2, col3 = st.columns([1, 2, 1])
@@ -457,12 +481,11 @@ def show_app(model):
             prog = st.progress(0)
             status = st.empty()
             all_masks = []
-            all_expanded_masks = []
             
             for i in range(num_slices):
                 status.text(f"Analyzing slice {i+1}/{num_slices}...")
-                orig_mask, expanded_mask, _ = segment_slice(model, volume[i])
-                all_masks.append(expanded_mask)  # Use expanded mask for better coverage
+                binary_mask, _ = segment_slice_patch_based(model, volume[i])
+                all_masks.append(binary_mask)
                 prog.progress((i + 1) / num_slices)
             
             mask_3d = np.stack(all_masks)
