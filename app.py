@@ -6,20 +6,16 @@ import numpy as np
 from PIL import Image
 import matplotlib.pyplot as plt
 from collections import OrderedDict
-import zipfile
 import os
-import tempfile
-import shutil
 
 st.set_page_config(page_title="LungVision AI", page_icon="", layout="wide")
 
 st.markdown("""
 <style>
-    .stApp { background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%); }
+    .stApp { background: #0b1120; }
     .main > div { padding: 1rem; }
     h1, h2, h3 { color: #f8fafc; }
     .stButton > button { background: #0ea5e9; color: white; border: none; }
-    [data-testid="stFileUploader"] > div { background: #111827; border: 2px dashed #1e2d4a; border-radius: 12px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -90,22 +86,14 @@ class MemoryEfficientUNet(nn.Module):
 # ============================================================
 # LOAD MODEL
 # ============================================================
-MODEL_PATH = "best_model.pth"
-
 @st.cache_resource
 def load_model():
-    # Try to find model in different locations
-    paths_to_try = [
-        "best_model.pth",
-        "/kaggle/working/best_model.pth",
-        "/mount/src/lung-nodule-segmentation-tool/best_model.pth",
-        "complete_model_with_metadata.pth"
-    ]
-    
+    # Try multiple possible paths
+    paths = ["best_model.pth", "/kaggle/working/best_model.pth", "complete_model_with_metadata.pth"]
     model_path = None
-    for path in paths_to_try:
-        if os.path.exists(path):
-            model_path = path
+    for p in paths:
+        if os.path.exists(p):
+            model_path = p
             break
     
     if model_path is None:
@@ -129,118 +117,73 @@ def load_model():
         state_dict = new_state_dict
     
     model.load_state_dict(state_dict)
-    model = model.to(device)
     model.eval()
     return model
 
 def segment_patch(model, patch_img):
-    # Patch is already 128x128 from pre-extracted data
-    tensor = torch.FloatTensor(patch_img / 255.0).unsqueeze(0).unsqueeze(0).to(device)
+    # Input is already 128x128
+    tensor = torch.FloatTensor(patch_img / 255.0).unsqueeze(0).unsqueeze(0)
     
     with torch.no_grad():
-        prob = torch.sigmoid(model(tensor)).squeeze().cpu().numpy()
+        prob = torch.sigmoid(model(tensor)).squeeze().numpy()
     
     pred_mask = (prob > 0.5).astype(np.uint8)
     return pred_mask, prob
 
+# ============================================================
+# MAIN APP
+# ============================================================
 st.title("LungVision AI")
-st.markdown("Lung Nodule Segmentation on Pre-extracted 128x128 Patches")
+st.markdown("Lung Nodule Segmentation")
 
-# Upload patches zip file
-st.markdown("### Upload Test Patches")
-st.info("Upload the luna_test_patches.zip file containing pre-extracted 128x128 patches")
+st.markdown("### Upload CT Patch")
+st.info("Upload a 128x128 PNG patch extracted from a CT scan (centered on suspicious region)")
 
-uploaded_file = st.file_uploader("Upload ZIP file with patches", type=["zip"])
+uploaded_file = st.file_uploader("Select PNG image", type=["png"])
 
 if uploaded_file is not None:
     model = load_model()
     if model is None:
         st.stop()
     
-    # Extract zip
-    with tempfile.TemporaryDirectory() as tmpdir:
-        zip_path = os.path.join(tmpdir, "patches.zip")
-        with open(zip_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-        
-        with zipfile.ZipFile(zip_path, 'r') as zf:
-            zf.extractall(tmpdir)
-        
-        # Find images
-        images_dir = os.path.join(tmpdir, "images")
-        if not os.path.exists(images_dir):
-            st.error("No 'images' folder found in zip")
-            st.stop()
-        
-        image_files = sorted([f for f in os.listdir(images_dir) if f.endswith('.png')])
-        
-        if len(image_files) == 0:
-            st.error("No PNG files found in images folder")
-            st.stop()
-        
-        st.success(f"Found {len(image_files)} test patches")
-        
-        # Process each patch
-        dice_scores = []
-        results = []
-        
-        for i, img_file in enumerate(image_files[:10]):  # Limit to 10 for speed
-            img_path = os.path.join(images_dir, img_file)
-            patch_img = np.array(Image.open(img_path).convert('L'), dtype=np.float32)
-            
-            # Get corresponding mask if available
-            mask_path = os.path.join(tmpdir, "masks", img_file)
-            has_gt = os.path.exists(mask_path)
-            if has_gt:
-                gt_mask = np.array(Image.open(mask_path).convert('L'), dtype=np.float32) / 255.0
-            else:
-                gt_mask = None
-            
-            # Segment
-            pred_mask, prob = segment_patch(model, patch_img)
-            
-            if has_gt:
-                intersection = (pred_mask * gt_mask).sum()
-                dice = (2.0 * intersection) / (pred_mask.sum() + gt_mask.sum() + 1e-6)
-                dice_scores.append(dice)
-            else:
-                dice = None
-            
-            results.append({
-                'patch': img_file,
-                'dice': dice,
-                'image': patch_img,
-                'pred_mask': pred_mask,
-                'gt_mask': gt_mask
-            })
-        
-        # Display results
-        st.markdown("### Results")
-        
-        for res in results:
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.image(res['image'], caption=f"Original: {res['patch']}", use_container_width=True, clamp=True)
-            
-            with col2:
-                st.image(res['pred_mask'], caption="Prediction", use_container_width=True, clamp=True)
-            
-            with col3:
-                if res['gt_mask'] is not None:
-                    st.image(res['gt_mask'], caption=f"Ground Truth (Dice: {res['dice']:.4f})", use_container_width=True, clamp=True)
-                else:
-                    st.image(res['pred_mask'], caption="Segmentation Result", use_container_width=True, clamp=True)
-            
-            st.divider()
-        
-        if dice_scores:
-            st.markdown("### Summary")
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Patches", len(results))
-            col2.metric("Average Dice", f"{np.mean(dice_scores):.4f}")
-            col3.metric("Best Dice", f"{np.max(dice_scores):.4f}")
-            col4.metric("Validation Dice", "0.8871")
+    # Load image
+    img = np.array(Image.open(uploaded_file).convert('L'), dtype=np.float32)
+    
+    # Check size
+    if img.shape != (128, 128):
+        st.warning(f"Image size is {img.shape}, expected 128x128. Resizing...")
+        from skimage.transform import resize
+        img = resize(img, (128, 128), preserve_range=True)
+    
+    # Segment
+    with st.spinner("Analyzing..."):
+        pred_mask, prob = segment_patch(model, img)
+    
+    # Display results
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.image(img, caption="Original CT Patch", use_container_width=True, clamp=True)
+    
+    with col2:
+        st.image(pred_mask * 255, caption="Segmentation Mask", use_container_width=True, clamp=True)
+    
+    with col3:
+        # Create overlay
+        overlay = np.stack([img/255.0, img/255.0, img/255.0], axis=-1)
+        overlay[pred_mask > 0, 0] = 1.0  # Red channel
+        overlay[pred_mask > 0, 1] = 0.2   # Green channel
+        overlay[pred_mask > 0, 2] = 0.2   # Blue channel
+        st.image(overlay, caption="Overlay (Red = Nodule)", use_container_width=True)
+    
+    # Nodule info
+    nodule_area = pred_mask.sum()
+    if nodule_area > 0:
+        st.success(f"Nodule detected! Area: {nodule_area} pixels")
+        confidence = prob.max()
+        st.metric("Detection Confidence", f"{confidence:.2%}")
+    else:
+        st.info("No nodule detected in this patch")
 
 st.markdown("---")
-st.caption("Upload the luna_test_patches.zip file containing 128x128 patches extracted from LUNA16")
+st.caption("Upload a 128x128 PNG patch. Model will output segmentation mask.")
