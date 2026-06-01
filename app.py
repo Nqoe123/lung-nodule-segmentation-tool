@@ -160,23 +160,26 @@ if uploaded_file is not None:
     with st.spinner("Analyzing..."):
         pred_mask, prob = segment_patch(model, img)
     
+    # Normalize image for display (0-255 to 0-1)
+    img_display = img / 255.0
+    mask_display = pred_mask.astype(np.float32)
+    
+    # Create overlay
+    overlay = np.stack([img_display, img_display, img_display], axis=-1)
+    overlay[pred_mask > 0, 0] = 1.0
+    overlay[pred_mask > 0, 1] = 0.2
+    overlay[pred_mask > 0, 2] = 0.2
+    
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        st.image(img, caption="Original CT Patch", width=300)
-        st.caption("Original CT Patch")
+        st.image(img_display, caption="Original CT Patch", clamp=True, use_container_width=True)
     
     with col2:
-        st.image(pred_mask * 255, caption="Segmentation Mask", width=300)
-        st.caption("Segmentation Mask")
+        st.image(mask_display, caption="Segmentation Mask", clamp=True, use_container_width=True)
     
     with col3:
-        overlay = np.stack([img/255.0, img/255.0, img/255.0], axis=-1)
-        overlay[pred_mask > 0, 0] = 1.0
-        overlay[pred_mask > 0, 1] = 0.2
-        overlay[pred_mask > 0, 2] = 0.2
-        st.image(overlay, caption="Overlay (Red = Nodule)", width=300)
-        st.caption("Detection Overlay")
+        st.image(overlay, caption="Overlay (Red = Nodule)", clamp=True, use_container_width=True)
     
     nodule_area = pred_mask.sum()
     if nodule_area > 0:
