@@ -4,7 +4,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from PIL import Image
-import matplotlib.pyplot as plt
 from collections import OrderedDict
 import os
 
@@ -160,7 +159,7 @@ if uploaded_file is not None:
     with st.spinner("Analyzing..."):
         pred_mask, prob = segment_patch(model, img)
     
-    # Normalize image for display (0-255 to 0-1)
+    # Normalize for display
     img_display = img / 255.0
     mask_display = pred_mask.astype(np.float32)
     
@@ -170,16 +169,26 @@ if uploaded_file is not None:
     overlay[pred_mask > 0, 1] = 0.2
     overlay[pred_mask > 0, 2] = 0.2
     
-    col1, col2, col3 = st.columns(3)
+    # Display using matplotlib to avoid Streamlit image issues
+    import matplotlib.pyplot as plt
     
-    with col1:
-        st.image(img_display, caption="Original CT Patch", clamp=True, use_container_width=True)
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
     
-    with col2:
-        st.image(mask_display, caption="Segmentation Mask", clamp=True, use_container_width=True)
+    axes[0].imshow(img_display, cmap='gray')
+    axes[0].set_title("Original CT Patch")
+    axes[0].axis('off')
     
-    with col3:
-        st.image(overlay, caption="Overlay (Red = Nodule)", clamp=True, use_container_width=True)
+    axes[1].imshow(mask_display, cmap='gray')
+    axes[1].set_title("Segmentation Mask")
+    axes[1].axis('off')
+    
+    axes[2].imshow(overlay)
+    axes[2].set_title("Overlay (Red = Nodule)")
+    axes[2].axis('off')
+    
+    plt.tight_layout()
+    st.pyplot(fig)
+    plt.close(fig)
     
     nodule_area = pred_mask.sum()
     if nodule_area > 0:
