@@ -219,7 +219,7 @@ def show_app():
             st.session_state.clear()
             st.rerun()
         st.markdown("---")
-        st.info("Upload a CT patch for automated nodule detection.")
+        st.info("Upload a CT image for automated nodule detection")
         st.markdown("---")
         st.caption("Model trained on LUNA16 and LIDC datasets")
         st.caption("Validation Dice Score: 0.8871")
@@ -240,7 +240,7 @@ def show_app():
             img = resize(img, (128, 128), preserve_range=True)
         
         with st.spinner("Analyzing..."):
-            pred_mask, prob = segment_patch(model, img)
+            pred_mask, _ = segment_patch(model, img)
         
         img_display = img / 255.0
         mask_display = pred_mask.astype(np.float32)
@@ -271,7 +271,6 @@ def show_app():
         nodule_area = pred_mask.sum()
         if nodule_area > 0:
             st.success(f"Nodule detected! Area: {nodule_area} pixels")
-            st.metric("Confidence", f"{prob.max():.2%}")
         else:
             st.info("No nodule detected")
     
