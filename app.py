@@ -3,10 +3,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import pandas as pd
 from PIL import Image
 import matplotlib.pyplot as plt
 from collections import OrderedDict
 import os
+from datetime import datetime
 
 st.set_page_config(page_title="LungVision AI", page_icon="", layout="wide")
 
@@ -20,17 +22,6 @@ st.markdown("""
     h1, h2, h3 { color: #f8fafc; }
     .stButton > button { background: #0ea5e9; color: white; border: none; border-radius: 8px; padding: 0.5rem 1rem; }
     .stButton > button:hover { background: #0284c7; }
-    .login-container {
-        max-width: 400px;
-        margin: 0 auto;
-        padding: 2rem;
-        background: #111827;
-        border-radius: 16px;
-        border: 1px solid #1e2d4a;
-        text-align: center;
-    }
-    .login-container h2 { margin-bottom: 1.5rem; }
-    .login-container input { width: 100%; padding: 0.5rem; margin-bottom: 1rem; background: #0f172a; border: 1px solid #1e2d4a; border-radius: 8px; color: #f1f5f9; }
     .glass-panel {
         background: rgba(30, 41, 59, 0.6);
         backdrop-filter: blur(12px);
@@ -168,7 +159,24 @@ def segment_patch(model, patch_img):
         prob = torch.sigmoid(model(tensor)).squeeze().numpy()
     
     pred_mask = (prob > 0.5).astype(np.uint8)
-    return pred_mask, prob
+    confidence = prob.max()
+    return pred_mask, confidence
+
+def calculate_nodule_volume(mask_area_px, pixel_spacing_mm=0.7):
+    """
+    Calculate approximate nodule volume in mm³.
+    Assumes spherical nodule and 0.7mm pixel spacing (typical CT).
+    """
+    # Convert area to mm²
+    area_mm2 = mask_area_px * (pixel_spacing_mm ** 2)
+    
+    # Calculate radius from area (assuming circular)
+    radius_mm = np.sqrt(area_mm2 / np.pi)
+    
+    # Calculate volume of sphere
+    volume_mm3 = (4/3) * np.pi * (radius_mm ** 3)
+    
+    return volume_mm3, radius_mm * 2  # returns volume and diameter
 
 # ============================================================
 # LOGIN PAGE
@@ -219,10 +227,15 @@ def show_app():
             st.session_state.clear()
             st.rerun()
         st.markdown("---")
-        st.info("Upload a CT image for automated nodule detection")
+        st.info("Upload a CT patch for automated nodule detection")
         st.markdown("---")
         st.caption("Model trained on LUNA16 and LIDC datasets")
         st.caption("Validation Dice Score: 0.8871")
+        
+        # Pixel spacing setting (since PNG has no metadata)
+        st.markdown("### Volume Calculation Settings")
+        pixel_spacing = st.number_input("Pixel Spacing (mm)", min_value=0.3, max_value=1.5, value=0.7, step=0.05, help="Typical CT: 0.6-0.8 mm")
+        st.caption("Used to convert pixel area to mm³ volume")
     
     st.markdown('<div class="section-label">CT Image Upload</div>', unsafe_allow_html=True)
     
@@ -240,7 +253,7 @@ def show_app():
             img = resize(img, (128, 128), preserve_range=True)
         
         with st.spinner("Analyzing..."):
-            pred_mask, _ = segment_patch(model, img)
+            pred_mask, confidence = segment_patch(model, img)
         
         img_display = img / 255.0
         mask_display = pred_mask.astype(np.float32)
@@ -268,11 +281,55 @@ def show_app():
         st.pyplot(fig)
         plt.close(fig)
         
-        nodule_area = pred_mask.sum()
-        if nodule_area > 0:
-            st.success(f"Nodule detected! Area: {nodule_area} pixels")
+        nodule_area_px = pred_mask.sum()
+        
+        if nodule_area_px > 0:
+            # Calculate volume
+            volume_mm3, diameter_mm = calculate_nodule_volume(nodule_area_px, pixel_spacing)
+            
+            # Display metrics
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Nodule Area", f"{nodule_area_px:.0f} px²")
+            col2.metric("Diameter", f"{diameter_mm:.1f} mm")
+            col3.metric("Volume", f"{volume_mm3:.1f} mm³")
+            col4.metric("Confidence", f"{confidence:.1%}")
+            
+            # Clinical recommendation
+            if diameter_mm < 5:
+                st.success("Clinical Recommendation: Routine follow-up (Annual CT)")
+            elif diameter_mm < 8:
+                st.warning("Clinical Recommendation: Short-term follow-up (6-12 months)")
+            else:
+                st.error("Clinical Recommendation: Further evaluation (Pulmonology consult)")
+            
+            # Download results button
+            results_df = pd.DataFrame([{
+                "Parameter": "Nodule Area (pixels²)",
+                "Value": f"{nodule_area_px:.0f}"
+            }, {
+                "Parameter": "Diameter (mm)",
+                "Value": f"{diameter_mm:.1f}"
+            }, {
+                "Parameter": "Volume (mm³)",
+                "Value": f"{volume_mm3:.1f}"
+            }, {
+                "Parameter": "Detection Confidence",
+                "Value": f"{confidence:.1%}"
+            }, {
+                "Parameter": "Clinical Recommendation",
+                "Value": "Routine follow-up" if diameter_mm < 5 else "Short-term follow-up" if diameter_mm < 8 else "Further evaluation"
+            }])
+            
+            csv = results_df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                "Download Results (CSV)",
+                csv,
+                f"lungvision_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                "text/csv",
+                use_container_width=True
+            )
         else:
-            st.info("No nodule detected")
+            st.info("No nodule detected in this image")
     
     st.markdown("---")
     st.caption("LungVision AI - Clinical Decision Support System")
