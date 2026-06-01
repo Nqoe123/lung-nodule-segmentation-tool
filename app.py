@@ -78,9 +78,15 @@ class MemoryEfficientUNet(nn.Module):
         self.up4 = Up(64, 32, bilinear)
         self.outc = OutConv(32, n_classes)
     def forward(self, x):
-        x1 = self.inc(x); x2 = self.down1(x1); x3 = self.down2(x2); x4 = self.down3(x3)
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
         x5 = self.down4(x4)
-        x = self.up1(x5, x4); x = self.up2(x, x3); x = self.up3(x, x2); x = self.up4(x, x1)
+        x = self.up1(x5, x4)
+        x = self.up2(x, x3)
+        x = self.up3(x, x2)
+        x = self.up4(x, x1)
         return self.outc(x)
 
 # ============================================================
@@ -88,7 +94,6 @@ class MemoryEfficientUNet(nn.Module):
 # ============================================================
 @st.cache_resource
 def load_model():
-    # Try multiple possible paths
     paths = ["best_model.pth", "/kaggle/working/best_model.pth", "complete_model_with_metadata.pth"]
     model_path = None
     for p in paths:
@@ -121,7 +126,6 @@ def load_model():
     return model
 
 def segment_patch(model, patch_img):
-    # Input is already 128x128
     tensor = torch.FloatTensor(patch_img / 255.0).unsqueeze(0).unsqueeze(0)
     
     with torch.no_grad():
@@ -137,7 +141,7 @@ st.title("LungVision AI")
 st.markdown("Lung Nodule Segmentation")
 
 st.markdown("### Upload CT Patch")
-st.info("Upload a 128x128 PNG patch extracted from a CT scan (centered on suspicious region)")
+st.info("Upload a 128x128 PNG patch extracted from a CT scan")
 
 uploaded_file = st.file_uploader("Select PNG image", type=["png"])
 
@@ -146,37 +150,34 @@ if uploaded_file is not None:
     if model is None:
         st.stop()
     
-    # Load image
     img = np.array(Image.open(uploaded_file).convert('L'), dtype=np.float32)
     
-    # Check size
     if img.shape != (128, 128):
         st.warning(f"Image size is {img.shape}, expected 128x128. Resizing...")
         from skimage.transform import resize
         img = resize(img, (128, 128), preserve_range=True)
     
-    # Segment
     with st.spinner("Analyzing..."):
         pred_mask, prob = segment_patch(model, img)
     
-    # Display results
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        st.image(img, caption="Original CT Patch", use_container_width=True, clamp=True)
+        st.image(img, caption="Original CT Patch", width=300)
+        st.caption("Original CT Patch")
     
     with col2:
-        st.image(pred_mask * 255, caption="Segmentation Mask", use_container_width=True, clamp=True)
+        st.image(pred_mask * 255, caption="Segmentation Mask", width=300)
+        st.caption("Segmentation Mask")
     
     with col3:
-        # Create overlay
         overlay = np.stack([img/255.0, img/255.0, img/255.0], axis=-1)
-        overlay[pred_mask > 0, 0] = 1.0  # Red channel
-        overlay[pred_mask > 0, 1] = 0.2   # Green channel
-        overlay[pred_mask > 0, 2] = 0.2   # Blue channel
-        st.image(overlay, caption="Overlay (Red = Nodule)", use_container_width=True)
+        overlay[pred_mask > 0, 0] = 1.0
+        overlay[pred_mask > 0, 1] = 0.2
+        overlay[pred_mask > 0, 2] = 0.2
+        st.image(overlay, caption="Overlay (Red = Nodule)", width=300)
+        st.caption("Detection Overlay")
     
-    # Nodule info
     nodule_area = pred_mask.sum()
     if nodule_area > 0:
         st.success(f"Nodule detected! Area: {nodule_area} pixels")
@@ -186,4 +187,4 @@ if uploaded_file is not None:
         st.info("No nodule detected in this patch")
 
 st.markdown("---")
-st.caption("Upload a 128x128 PNG patch. Model will output segmentation mask.")
+st.caption("Upload a 128x128 PNG patch. The model will output a segmentation mask.")
